@@ -1,0 +1,40 @@
+# Example kutu configuration.
+#
+# chu loads config in the order: defaults -> this file -> environment.
+# Point kutu at this file with CONFIG_FILE=env/config/kutu.yaml, or drop a
+# kutu.yaml next to the binary. Every value can also be set via an
+# environment variable with the KUTU_ prefix, e.g.:
+#
+#   KUTU_STORAGE_DSN=postgres://kutu:kutu@localhost:5432/kutu?sslmode=disable
+#   KUTU_SERVER_PORT=8080
+#   KUTU_LOG_LEVEL=debug
+
+log_level: info
+
+server:
+  host: ""        # bind address; empty = all interfaces
+  port: "8080"
+
+storage:
+  # PostgreSQL connection string. Required.
+  dsn: "postgres://kutu:kutu@localhost:5432/kutu?sslmode=disable"
+  max_open_conns: 10
+  max_idle_conns: 5
+  conn_max_lifetime: 1h
+
+# At-rest encryption key. Secret values in the settings document
+# (registry upstream credentials) are sealed with a key derived from
+# this passphrase.
+#
+#   - Empty + already initialized -> server starts LOCKED; enter the key
+#     through the UI unlock screen (or POST /api/v1/key/unlock).
+#   - Set + already initialized   -> auto-unlock on boot.
+#   - Set + fresh install         -> auto-initialize with this key.
+#
+# Prefer the KUTU_ENCRYPTION_PASSWORD env var over writing it here.
+encryption:
+  password: ""
+
+# Telemetry is OpenTelemetry (OTLP). Leave the endpoint empty to run with
+# no-op providers. Set OTEL_EXPORTER_OTLP_ENDPOINT to enable export.
+telemetry: {}

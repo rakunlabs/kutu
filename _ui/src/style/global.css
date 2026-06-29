@@ -1,0 +1,313 @@
+/* stylelint-disable-next-line import-notation */
+@import 'tailwindcss';
+
+/* Self-hosted monospace fonts for the code editor. See fonts.css for
+   the rationale — every face exposed in the Appearance > Font family
+   dropdown is bundled here so previews always render correctly. */
+@import './fonts.css';
+
+/* Tailwind v4 uses CSS-first config. Enable the `dark:` variant against
+   a `.dark` class on a parent element. The prefs store toggles this
+   class on <html> based on the user's app theme preference. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Brand palette.
+   Reference colors picked for this project:
+     #1D3557  deep navy           (brand-700, primary actions)
+     #EB5E28  burnt orange        (accent-600, highlights / call-outs)
+     #FF9F1C  amber               (accent-400, warning / attention)
+     #F95738  coral red           (accent-500, destructive / alert)
+   The full scales below are computed around those anchors so the
+   familiar Tailwind utility ergonomics (brand-50 … brand-900) still
+   hold. `brand-*` is the calm navy used as the default primary
+   action color (replaces the old "blue" everywhere); `accent-*` is
+   the warm orange used sparingly for emphasis (active pills,
+   selected file highlights) where the navy would feel too quiet.
+   ──────────────────────────────────────────────────────────────────────── */
+@theme {
+  /* Navy — primary actions, focus rings, links. */
+  --color-brand-50:  #eaf0f7;
+  --color-brand-100: #cbd8e8;
+  --color-brand-200: #94aece;
+  --color-brand-300: #5d84b3;
+  --color-brand-400: #355f93;
+  --color-brand-500: #1d3557;
+  --color-brand-600: #182c49;
+  --color-brand-700: #14253c;
+  --color-brand-800: #0f1c2e;
+  --color-brand-900: #0a1320;
+  --color-brand-950: #060b14;
+
+  /* Teal — "selected / active" highlight. Used everywhere we previously
+     reached for a warm orange (file tree selection, tab indicators,
+     "you" row, capability picker chips, etc.). Cooler tone reads as
+     calmer next to the navy navbar and the warm-grey dark surfaces.
+     The 950 step is used for dark-mode tinted backgrounds
+     (`dark:bg-accent-950/30` on selected vault rows etc.) — Tailwind
+     drops utilities referencing undefined tokens silently, so every
+     palette needs its 950 explicitly defined here. */
+  --color-accent-50:  #e5f5f4;
+  --color-accent-100: #c2e9e6;
+  --color-accent-200: #84d3cd;
+  --color-accent-300: #46bdb5;
+  --color-accent-400: #1ca99e;
+  --color-accent-500: #0e9594;
+  --color-accent-600: #0c7a78;
+  --color-accent-700: #095e5c;
+  --color-accent-800: #074645;
+  --color-accent-900: #052f2e;
+  --color-accent-950: #031f1e;
+
+  /* Vermilion — destructive/primary call-to-action. Used in just a few
+     places where we want a true red punch (Render Preview, etc.). Kept
+     separate from `accent-*` so changes to the selection palette don't
+     accidentally restyle the destructive surfaces. */
+  --color-vermilion-50:  #fdecef;
+  --color-vermilion-100: #fbd0d7;
+  --color-vermilion-200: #f7a4af;
+  --color-vermilion-300: #f47887;
+  --color-vermilion-400: #f14c5f;
+  --color-vermilion-500: #ef233c;
+  --color-vermilion-600: #c71e32;
+  --color-vermilion-700: #9f1828;
+  --color-vermilion-800: #77121e;
+  --color-vermilion-900: #4f0c14;
+  --color-vermilion-950: #37080d;
+
+  /* Cool neutral — info pills, dark-mode card surfaces. */
+  --color-cool-50:  #edf2f4;
+  --color-cool-100: #dce4e8;
+  --color-cool-200: #c2cdd5;
+  --color-cool-300: #a7b6c1;
+  --color-cool-400: #8d99ae;
+  --color-cool-500: #6f7c91;
+  --color-cool-600: #586374;
+  --color-cool-700: #404956;
+  --color-cool-800: #2a313b;
+  --color-cool-900: #181c22;
+  --color-cool-950: #0d1015;
+
+  /* Warm neutral — anchored on #403D39 (warm-600) and #1a1a1a (warm-900).
+     Used as the dark-mode surface palette: warmer than slate-* and pairs
+     naturally with the burnt-orange accent (#EB5E28). The dark theme
+     prefers these over slate to avoid the cold "GitHub dark" look.
+     Scale runs 50…950 to match Tailwind v4 conventions:
+       - 900 (#1a1a1a) is the page/app background tier
+       - 950 (#0e0e0e) is the deepest "app canvas" tier used by
+         full-bleed surfaces (vault item editor / sidebar) where we
+         want the surface to read clearly recessed below the warm-900
+         page background.
+     If you find a class like `dark:bg-warm-950` not rendering, this
+     token block is the place to add the missing step. Tailwind drops
+     utilities that reference undefined custom colors silently — the
+     element falls back to its previous declaration (often `bg-white`).
+  */
+  --color-warm-50:  #f4f3f2;
+  --color-warm-100: #e3e1de;
+  --color-warm-200: #c4c0ba;
+  --color-warm-300: #a39e96;
+  --color-warm-400: #7a746a;
+  --color-warm-500: #58534b;
+  --color-warm-600: #403d39;
+  --color-warm-700: #2d2b29;
+  --color-warm-800: #222120;
+  --color-warm-900: #1a1a1a;
+  --color-warm-950: #0e0e0e;
+}
+
+html,
+body {
+  @apply h-full w-full;
+}
+
+/* Default page-level text color so anything rendered OUTSIDE the App
+   shell's `text-slate-*` div still inherits a sensible value.
+
+   Background:
+   - App.svelte's `{:else}` branch wraps the routed UI in
+     `text-slate-800 dark:text-slate-100`. That handles 99% of the
+     tree.
+   - Full-screen overlays mounted at the App root level (UnlockScreen,
+     and any future portal-style modal) sit OUTSIDE that wrapper,
+     so they inherit from <body>, which the browser leaves at its
+     UA default (`CanvasText` / black).
+   - The form-element `color: inherit` rule below relies on a usable
+     ancestor color. Without this default the rule cheerfully
+     inherits black-on-dark — exactly the "input text is unreadable
+     on the locked screen" bug.
+
+   Setting it once on <body> means every escape hatch (overlays,
+   teleported dialogs, future portals) gets the right text color for
+   free, and component-level Tailwind classes still override it
+   wherever a designer wants a different tone. */
+body {
+  color: rgb(30 41 59); /* slate-800 */
+}
+.dark body {
+  color: rgb(241 245 249); /* slate-100 */
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Form-element color inheritance (dark mode fix).
+
+   <input>, <textarea>, and <select> do NOT inherit `color` from their
+   ancestor by browser default — each one gets a built-in black-ish
+   default (e.g. `-webkit-text-fill-color: black` on some Chromiums,
+   `CanvasText` on Firefox). That's fine on a white background but
+   illegible on the warm-950 dark surfaces the vault uses
+   (`dark:bg-warm-950` etc.), which is why vault password / search /
+   tag inputs rendered as black-on-near-black in dark mode.
+
+   Forcing `color: inherit` on these elements means they pick up the
+   App-level `text-slate-100` in dark mode (App.svelte:64) and
+   `text-slate-800` in light mode automatically. Existing components
+   that already specify `dark:text-...` on the input still win
+   because of the cascade specificity of utility classes.
+
+   `::placeholder` doesn't inherit either; we tone it down so it
+   reads as muted rather than the same color as live input text. */
+input,
+textarea,
+select {
+  color: inherit;
+}
+input::placeholder,
+textarea::placeholder {
+  color: rgb(148 163 184); /* slate-400 — works on both themes */
+  opacity: 1;
+}
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: rgb(100 116 139); /* slate-500 */
+}
+
+/* Safari/iOS quirk: -webkit-text-fill-color overrides `color`
+   inside <input>/<textarea>. Reset it so our inherit takes effect.
+   Without this, autofilled credentials show in the platform's
+   yellow-on-yellow regardless of our dark theme. */
+input,
+textarea {
+  -webkit-text-fill-color: inherit;
+}
+
+/* Chrome / Edge / Safari autofill override.
+
+   When the browser autofills a saved credential, it injects its own
+   user-agent style: black text on a pale blue/yellow background that
+   ignores `color`, `background`, and any Tailwind class on the
+   element. The standard workaround is a giant inset box-shadow (which
+   IS honoured during autofill) plus an explicit text-fill-color.
+
+   We split light/dark so the autofilled field still reads correctly
+   under both themes. The shadow color matches the surrounding input
+   bg (white / warm-700) so the autofilled state is visually
+   indistinguishable from a manually-typed value — without this, a
+   user landing on the locked screen with a saved server key sees a
+   stark light rectangle with black text against the dark card. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+textarea:-webkit-autofill:active {
+  -webkit-text-fill-color: rgb(30 41 59); /* slate-800 (light mode) */
+  -webkit-box-shadow: 0 0 0 1000px #ffffff inset;
+  caret-color: rgb(30 41 59);
+  transition: background-color 9999s ease-in-out 0s; /* defeat the autofill fade-in */
+}
+
+.dark input:-webkit-autofill,
+.dark input:-webkit-autofill:hover,
+.dark input:-webkit-autofill:focus,
+.dark input:-webkit-autofill:active,
+.dark textarea:-webkit-autofill,
+.dark textarea:-webkit-autofill:hover,
+.dark textarea:-webkit-autofill:focus,
+.dark textarea:-webkit-autofill:active {
+  -webkit-text-fill-color: #f1f5f9; /* slate-100 — matches dark:text-slate-100 used across forms */
+  -webkit-box-shadow: 0 0 0 1000px #1a1a1a inset; /* warm-900 — matches dark:bg-warm-900 used by Login/Unlock inputs */
+  caret-color: #f1f5f9;
+}
+
+/* Scrollbar styling */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
+}
+
+.dark *::-webkit-scrollbar-thumb {
+  background: #444;
+}
+
+.dark *::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #777;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Flat black-tape mask widget for masked config values.
+   Used by _ui/src/lib/components/config/maskExtension.ts (CodeMirror).
+   Pure 2D: solid black rectangle, slight skew so it still reads as a strip
+   of tape, no border, no rounded corners, no depth.
+   ────────────────────────────────────────────────────────────────────────── */
+.cm-mask {
+  display: inline-block;
+  padding: 1px 8px;
+  vertical-align: baseline;
+  line-height: 1.2;
+  min-width: 3.5em;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  color: transparent; /* hide the bullets that give us width */
+  background: #000;
+  transform: skew(-3deg);
+  transition: transform 120ms ease;
+}
+
+.cm-mask::before {
+  content: '••••••';
+}
+
+.cm-mask:hover {
+  transform: skew(-3deg) scale(1.05);
+  z-index: 1;
+}
+
+.cm-mask:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+/* Brief flash after Ctrl/⌘+click copies the underlying value. */
+.cm-mask--copied {
+  background: #facc15; /* yellow-400 */
+}
+
+.codemirror-wrapper {
+  height: 100%;
+}
