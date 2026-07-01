@@ -67,26 +67,6 @@ func (m *memStore) CreateRawMount(context.Context, *service.RawMountEntry) error
 func (m *memStore) UpdateRawMount(context.Context, *service.RawMountEntry) error { return nil }
 func (m *memStore) DeleteRawMount(context.Context, string) error                 { return nil }
 
-// ProxyStore
-func (m *memStore) ListProxyListeners(context.Context, *query.Query) ([]service.ProxyListener, error) {
-	return nil, nil
-}
-func (m *memStore) GetProxyListener(context.Context, string) (*service.ProxyListener, error) {
-	return nil, service.ErrNotFound
-}
-func (m *memStore) CreateProxyListener(context.Context, *service.ProxyListener) error { return nil }
-func (m *memStore) UpdateProxyListener(context.Context, *service.ProxyListener) error { return nil }
-func (m *memStore) DeleteProxyListener(context.Context, string) error                 { return nil }
-func (m *memStore) ListProxyServers(context.Context, *query.Query) ([]service.ProxyServer, error) {
-	return nil, nil
-}
-func (m *memStore) GetProxyServer(context.Context, string) (*service.ProxyServer, error) {
-	return nil, service.ErrNotFound
-}
-func (m *memStore) CreateProxyServer(context.Context, *service.ProxyServer) error { return nil }
-func (m *memStore) UpdateProxyServer(context.Context, *service.ProxyServer) error { return nil }
-func (m *memStore) DeleteProxyServer(context.Context, string) error               { return nil }
-
 // HookStore
 func (m *memStore) ListHooks(context.Context) ([]hook.Hook, error)  { return nil, nil }
 func (m *memStore) ReplaceHooks(context.Context, []hook.Hook) error { return nil }

@@ -28,9 +28,17 @@ build-ui: install-ui ## Build the SPA and embed it into internal/server/dist
 build: build-ui build-go ## Generate the UI then build the Go binary
 
 .PHONY: build-go
-build-go: ## Build the Go binary into ./bin (uses the already-embedded UI)
-	@mkdir -p bin
-	go build -ldflags="$(LDFLAGS)" -o bin/$(PROJECT) $(MAIN_FILE)
+build-go: ## Build the Go binary with goreleaser (uses the already-embedded UI)
+	@echo "> Building $(PROJECT) binary with goreleaser"
+	goreleaser build --snapshot --clean --single-target
+
+.PHONY: build-container
+build-container: build ## Build the container image with the :test tag
+	docker build -t $(PROJECT):test -f ci/Dockerfile dist/$(PROJECT)_linux_amd64_v1/
+
+.PHONY: release-snapshot
+release-snapshot: build-ui ## Build a full local snapshot release (all targets, no publish)
+	goreleaser release --snapshot --clean
 
 .PHONY: run-ui
 run-ui: ## Run the Vite dev server (proxies API to :8080)

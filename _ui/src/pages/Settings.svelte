@@ -3,7 +3,7 @@
  // between sections; the main pane renders the active one:
  //
  //   - Raw mounts : CRUD for the storage backends every other feature
- //                  reads from (file browser, registries, proxy).
+ //                  reads from (file browser, registries, file serving).
  //   - About      : build metadata (version / commit / date) and a link
  //                  to the source repository.
  //
@@ -11,19 +11,22 @@
  // soft-selection pattern + the About dl card), so this page matches
  // the rest of the rakunlabs UI family.
  import { onMount } from 'svelte';
- import { HardDrive, Info, ExternalLink, Copy, Check } from 'lucide-svelte';
+ import { HardDrive, Info, ExternalLink, Copy, Check, Server } from 'lucide-svelte';
  import { rawMountsStore } from '@/lib/store/rawmounts.svelte';
+ import { serveStore } from '@/lib/store/serve.svelte';
  import { appStore } from '@/lib/store/store.svelte';
  import { addToast } from '@/lib/store/toast.svelte';
  import RawMountsPanel from '@/lib/components/settings/RawMountsPanel.svelte';
+ import ServePanel from '@/lib/components/settings/ServePanel.svelte';
 
  // Source repository — derived from the Go module path
  // (github.com/rakunlabs/kutu). Used to build commit/release links.
  const REPO_URL = 'https://github.com/rakunlabs/kutu';
 
- type Section = 'mounts' | 'about';
+ type Section = 'mounts' | 'serve' | 'about';
  const sections: { key: Section; label: string; icon: typeof HardDrive }[] = [
   { key: 'mounts', label: 'Raw mounts', icon: HardDrive },
+  { key: 'serve', label: 'File serving', icon: Server },
   { key: 'about', label: 'About', icon: Info },
  ];
 
@@ -62,6 +65,7 @@
 
  onMount(() => {
   void rawMountsStore.load();
+  void serveStore.load();
  });
 </script>
 
@@ -94,6 +98,14 @@
      <div class="text-sm text-slate-500 dark:text-slate-400 py-10 text-center">Loading…</div>
     {:else}
      <RawMountsPanel configs={rawMountsStore.configs} mounts={rawMountsStore.mounts} />
+    {/if}
+   </div>
+  {:else if activeSection === 'serve'}
+   <div class="max-w-6xl p-6">
+    {#if !serveStore.loaded}
+     <div class="text-sm text-slate-500 dark:text-slate-400 py-10 text-center">Loading…</div>
+    {:else}
+     <ServePanel />
     {/if}
    </div>
   {:else if activeSection === 'about'}

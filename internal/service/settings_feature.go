@@ -117,9 +117,18 @@ type FTPShareEntry struct {
 	Root     bool     `json:"root,omitempty"`
 }
 
-// ProxySettings is the deployment-wide feature flag for the user-built
-// Proxy Servers. Kept for JSON round-trip compatibility; the live flag
-// is stored in kutu_meta and read via Service.ProxyEnabled.
-type ProxySettings struct {
-	Disabled bool `json:"disabled"`
+// ServeSettings is the aggregate configuration for kutu's built-in file
+// serving (FTP / SFTP / TFTP / WebDAV). It is persisted as a single
+// JSONB singleton in kutu_meta and edited as a whole from the UI. The
+// Users and Shares lists are shared across the protocols: shares define
+// which raw-mount paths are exposed and users provide the credentials
+// the FTP / SFTP / WebDAV servers authenticate against (TFTP is
+// anonymous by protocol design).
+type ServeSettings struct {
+	FTP    FTPServeSettings    `json:"ftp"`
+	SFTP   SFTPServeSettings   `json:"sftp"`
+	TFTP   TFTPServeSettings   `json:"tftp"`
+	WebDAV WebDAVServeSettings `json:"webdav"`
+	Users  []FTPUserEntry      `json:"users,omitempty"`
+	Shares []FTPShareEntry     `json:"shares,omitempty"`
 }

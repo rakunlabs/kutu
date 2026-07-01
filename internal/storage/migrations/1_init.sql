@@ -53,35 +53,6 @@ CREATE TABLE IF NOT EXISTS kutu_raw_mount (
     updated_by TEXT        NOT NULL DEFAULT ''
 );
 
--- ── Proxy ──
-CREATE TABLE IF NOT EXISTS kutu_proxy_listener (
-    id         TEXT PRIMARY KEY,
-    name       TEXT        NOT NULL DEFAULT '',
-    protocol   TEXT        NOT NULL DEFAULT 'http',
-    port       TEXT        NOT NULL DEFAULT '',
-    enabled    BOOLEAN     NOT NULL DEFAULT false,
-    -- host, tls, notes.
-    data       JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_by TEXT        NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS kutu_proxy_server (
-    id          TEXT PRIMARY KEY,
-    name        TEXT        NOT NULL DEFAULT '',
-    enabled     BOOLEAN     NOT NULL DEFAULT false,
-    listener_id TEXT        NOT NULL DEFAULT '',
-    protocol    TEXT        NOT NULL DEFAULT '',
-    -- host, port, host_match, nodes, edges, pipeline.
-    data        JSONB,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_by  TEXT        NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS kutu_proxy_server_listener_idx ON kutu_proxy_server (listener_id);
-
 -- ── Hooks ──
 CREATE TABLE IF NOT EXISTS kutu_hook (
     name       TEXT PRIMARY KEY,

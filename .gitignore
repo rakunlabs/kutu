@@ -7,3 +7,5 @@
 # generated bundle itself is not committed.
 /internal/server/dist/*
 !/internal/server/dist/.gitkeep
+/.opencode
+/graphify-out

@@ -41,20 +41,6 @@ type RawMountStore interface {
 	DeleteRawMount(ctx context.Context, prefix string) error
 }
 
-// ProxyStore persists the proxy listener/server tables.
-type ProxyStore interface {
-	ListProxyListeners(ctx context.Context, q *query.Query) ([]ProxyListener, error)
-	GetProxyListener(ctx context.Context, id string) (*ProxyListener, error)
-	CreateProxyListener(ctx context.Context, l *ProxyListener) error
-	UpdateProxyListener(ctx context.Context, l *ProxyListener) error
-	DeleteProxyListener(ctx context.Context, id string) error
-	ListProxyServers(ctx context.Context, q *query.Query) ([]ProxyServer, error)
-	GetProxyServer(ctx context.Context, id string) (*ProxyServer, error)
-	CreateProxyServer(ctx context.Context, srv *ProxyServer) error
-	UpdateProxyServer(ctx context.Context, srv *ProxyServer) error
-	DeleteProxyServer(ctx context.Context, id string) error
-}
-
 // HookStore persists the hook table.
 type HookStore interface {
 	ListHooks(ctx context.Context) ([]hook.Hook, error)
@@ -72,7 +58,6 @@ type MetaStore interface {
 type Storage interface {
 	RegistryStore
 	RawMountStore
-	ProxyStore
 	HookStore
 	MetaStore
 }

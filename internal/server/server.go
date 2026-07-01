@@ -24,7 +24,7 @@ import (
 	"github.com/rakunlabs/kutu/internal/hook"
 	"github.com/rakunlabs/kutu/internal/server/api"
 	"github.com/rakunlabs/kutu/internal/server/lockgate"
-	"github.com/rakunlabs/kutu/internal/server/proxy"
+	"github.com/rakunlabs/kutu/internal/server/serve"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
@@ -49,6 +49,28 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 	}
 	rawHandler := api.NewRawHandlerFromMounts(ctx, mounts, dispatcher)
 
+	// ── File serving (FTP / SFTP / TFTP / WebDAV) ──
+	// Shares resolve against the live raw-mount table above. A generated
+	// SFTP host key is persisted back into the serve settings so it
+	// survives restarts.
+	serveMgr := serve.NewManager(ctx, rawHandler, func(pem string) {
+		cfg, err := svc.GetServeSettings(ctx)
+		if err != nil {
+			slog.Warn("persist generated SFTP host key: load serve settings", "error", err)
+			return
+		}
+		cfg.SFTP.HostKeyPEM = pem
+		if err := svc.SetServeSettings(ctx, cfg); err != nil {
+			slog.Warn("persist generated SFTP host key", "error", err)
+		}
+	})
+	if serveCfg, serr := svc.GetServeSettings(ctx); serr != nil {
+		slog.Warn("load serve settings", "error", serr)
+	} else {
+		serveMgr.Reconcile(serveCfg)
+	}
+	defer serveMgr.Stop()
+
 	// ── Artifact registry ──
 	registryMgr := api.BootRegistryManager(ctx, svc, rawHandler, dispatcher)
 	if err := registerRegistryFactories(registryMgr); err != nil {
@@ -56,20 +78,6 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 	}
 	registryMgr.Reload(ctx, svc.GetRegistrySettings(ctx))
 	defer registryMgr.Close()
-
-	// ── User-built proxy ──
-	adapter := &proxy.ServiceAdapter{
-		S:          svc,
-		RawMounts:  rawHandler,
-		Registries: registryMgr,
-	}
-	proxyMgr := proxy.NewManager(ctx, adapter, cfg.Server.Host, []string{cfg.Server.Port})
-	listeners, _ := svc.ListProxyListeners(ctx, nil)
-	servers, _ := svc.ListProxyServers(ctx, nil)
-	if rerr := proxyMgr.ReconcileAll(listeners, servers); rerr != nil {
-		slog.Warn("initial proxy reconcile reported issues", "error", rerr)
-	}
-	defer proxyMgr.Stop()
 
 	// ── HTTP server ──
 	server := ada.New()
@@ -87,7 +95,7 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 		actorMiddleware,      // capture the optional X-User header for audit
 	)
 
-	if err := api.Handle(server.Mux, svc, info, rawHandler, proxyMgr, registryMgr, dispatcher); err != nil {
+	if err := api.Handle(server.Mux, svc, info, rawHandler, serveMgr, registryMgr, dispatcher); err != nil {
 		return err
 	}
 
@@ -97,7 +105,6 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 		return fmt.Errorf("mount UI: %w", err)
 	}
 
-	slog.Info("kutu listening", "addr", cfg.Server.Addr())
 	return server.StartWithContext(ctx, cfg.Server.Addr())
 }
 

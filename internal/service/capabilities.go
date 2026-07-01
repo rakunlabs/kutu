@@ -11,9 +11,6 @@ const (
 	CapRawRead  = "raw.read"
 	CapRawWrite = "raw.write"
 
-	CapProxyRead   = "proxy.read"
-	CapProxyManage = "proxy.manage"
-
 	CapRegistryRead   = "registry.read"
 	CapRegistryWrite  = "registry.write"
 	CapRegistryDelete = "registry.delete"
@@ -25,7 +22,6 @@ const (
 // capability checks inherited from pika always pass.
 var AllCapabilities = []string{
 	CapRawRead, CapRawWrite,
-	CapProxyRead, CapProxyManage,
 	CapRegistryRead, CapRegistryWrite, CapRegistryDelete, CapRegistryAdmin,
 }
 

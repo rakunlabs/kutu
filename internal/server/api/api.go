@@ -15,7 +15,7 @@ import (
 
 	"github.com/rakunlabs/kutu/internal/hook"
 	"github.com/rakunlabs/kutu/internal/registry"
-	"github.com/rakunlabs/kutu/internal/server/proxy"
+	"github.com/rakunlabs/kutu/internal/server/serve"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
@@ -39,7 +39,7 @@ type api struct {
 	svc         *service.Service
 	info        Info
 	rawHandler  *RawHandler
-	proxyMgr    *proxy.Manager
+	serveMgr    *serve.Manager
 	registryMgr *registry.Manager
 	dispatcher  *hook.Dispatcher
 	appCtx      context.Context
@@ -57,7 +57,7 @@ func Handle(
 	svc *service.Service,
 	info Info,
 	rawHandler *RawHandler,
-	proxyMgr *proxy.Manager,
+	serveMgr *serve.Manager,
 	registryMgr *registry.Manager,
 	dispatcher *hook.Dispatcher,
 ) error {
@@ -65,7 +65,7 @@ func Handle(
 		svc:         svc,
 		info:        info,
 		rawHandler:  rawHandler,
-		proxyMgr:    proxyMgr,
+		serveMgr:    serveMgr,
 		registryMgr: registryMgr,
 		dispatcher:  dispatcher,
 		appCtx:      context.Background(),
@@ -101,6 +101,14 @@ func Handle(
 	m.PUT("/api/v1/raw-mounts/{prefix}", m.Wrap(a.updateRawMount))
 	m.DELETE("/api/v1/raw-mounts/{prefix}", m.Wrap(a.deleteRawMount))
 
+	// ── File serving (FTP / SFTP / TFTP / WebDAV) ──
+	// A single settings document drives the four built-in servers; the
+	// status sibling reports each protocol's live bind state. Every save
+	// reconciles the running servers.
+	m.GET("/api/v1/serve", m.Wrap(a.getServeSettings))
+	m.PUT("/api/v1/serve", m.Wrap(a.updateServeSettings))
+	m.GET("/api/v1/serve/status", m.Wrap(a.getServeStatus))
+
 	// ── Raw mount file browser / serving ──
 	m.GET("/api/v1/raw/*", m.Wrap(a.getRaw))
 	m.PUT("/api/v1/raw/*", m.Wrap(a.putRaw))
@@ -109,23 +117,6 @@ func Handle(
 	m.POST("/api/v1/raw-rename", m.Wrap(a.rawHandler.renameFile))
 	m.POST("/api/v1/raw-copy", m.Wrap(a.rawHandler.copyFile))
 	m.POST("/api/v1/raw-move", m.Wrap(a.rawHandler.moveFile))
-
-	// ── Proxy CRUD + runtime ──
-	m.GET("/api/v1/proxy", m.Wrap(a.listProxyServers))
-	m.POST("/api/v1/proxy", m.Wrap(a.createProxyServer))
-	m.GET("/api/v1/proxy/catalog", m.Wrap(a.getProxyCatalog))
-	m.GET("/api/v1/proxy/status", m.Wrap(a.getProxyStatus))
-	m.POST("/api/v1/proxy/test", m.Wrap(a.proxyTest))
-	m.GET("/api/v1/proxy/listeners", m.Wrap(a.listProxyListeners))
-	m.POST("/api/v1/proxy/listeners", m.Wrap(a.createProxyListener))
-	m.GET("/api/v1/proxy/listeners/status", m.Wrap(a.getProxyListenersStatus))
-	m.GET("/api/v1/proxy/listeners/{id}", m.Wrap(a.getProxyListener))
-	m.PUT("/api/v1/proxy/listeners/{id}", m.Wrap(a.updateProxyListener))
-	m.DELETE("/api/v1/proxy/listeners/{id}", m.Wrap(a.deleteProxyListener))
-	m.GET("/api/v1/proxy/{id}", m.Wrap(a.getProxyServer))
-	m.PUT("/api/v1/proxy/{id}", m.Wrap(a.updateProxyServer))
-	m.DELETE("/api/v1/proxy/{id}", m.Wrap(a.deleteProxyServer))
-	m.POST("/api/v1/proxy/{id}/validate", m.Wrap(a.validateProxyServer))
 
 	// ── Registry admin ──
 	// GET returns the assembled namespace/repo tree; PUT toggles the

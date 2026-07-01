@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import { link } from "svelte-spa-router";
   import active from "svelte-spa-router/active";
-  import { Boxes, FolderTree, Network, Lock, Settings, User } from "lucide-svelte";
+  import { Boxes, FolderTree, Lock, Settings, User } from "lucide-svelte";
   import ThemeSwitcher from "@/lib/components/ThemeSwitcher.svelte";
   import { appStore } from "@/lib/store/store.svelte";
   import { userStore } from "@/lib/store/user.svelte";
@@ -10,7 +10,6 @@
   const nav = [
     { href: "/registries", match: /^\/(registries)?$/, label: "Registries", icon: Boxes },
     { href: "/files", match: "/files", label: "Files", icon: FolderTree },
-    { href: "/proxy", match: "/proxy", label: "Proxy", icon: Network },
     { href: "/settings", match: "/settings", label: "Settings", icon: Settings },
   ];
 

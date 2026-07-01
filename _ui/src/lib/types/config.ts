@@ -944,3 +944,85 @@ export interface RawMountConfig {
   webdav?: WebDAVMountConfig;
   vercelBlob?: VercelBlobMountConfig;
 }
+
+// ── File serving (FTP / SFTP / TFTP / WebDAV) ──
+// Mirrors the Go structs in internal/service/settings_feature.go +
+// service/serve.go. A single ServeSettings document drives the four
+// built-in servers; the user + share lists are shared across them.
+
+// FTPServeSettings mirrors service.FTPServeSettings.
+export interface FTPServeSettings {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+  public_ip?: string;
+  passive_ports?: string;
+  tls_cert_file?: string;
+  tls_key_file?: string;
+  tls_cert_pem?: string;
+  tls_key_pem?: string;
+  tls_required?: number;
+}
+
+// SFTPServeSettings mirrors service.SFTPServeSettings.
+export interface SFTPServeSettings {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+  host_key_path?: string;
+  host_key_pem?: string;
+}
+
+// TFTPServeSettings mirrors service.TFTPServeSettings.
+export interface TFTPServeSettings {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+}
+
+// WebDAVServeSettings mirrors service.WebDAVServeSettings.
+export interface WebDAVServeSettings {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+  prefix?: string;
+}
+
+// ServeUser mirrors service.FTPUserEntry.
+export interface ServeUser {
+  username: string;
+  password?: string;
+  shares?: string[];
+  authorized_keys?: string;
+  read_only: boolean;
+}
+
+// ServeShare mirrors service.FTPShareEntry. `paths` are
+// "<mount-prefix>" or "<mount-prefix>/<sub/path>".
+export interface ServeShare {
+  name: string;
+  paths: string[];
+  read_only: boolean;
+  root?: boolean;
+}
+
+// ServeSettings mirrors service.ServeSettings — the PUT body and the
+// document returned by GET /api/v1/serve.
+export interface ServeSettings {
+  ftp: FTPServeSettings;
+  sftp: SFTPServeSettings;
+  tftp: TFTPServeSettings;
+  webdav: WebDAVServeSettings;
+  users?: ServeUser[];
+  shares?: ServeShare[];
+}
+
+// ServeStatus mirrors serve.Status — one row per protocol from
+// GET /api/v1/serve/status.
+export interface ServeStatus {
+  protocol: string;
+  enabled: boolean;
+  running: boolean;
+  address?: string;
+  error?: string;
+}

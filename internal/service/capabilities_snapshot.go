@@ -13,11 +13,6 @@ const (
 	SnapshotCapRawRead  = "raw.read"
 	SnapshotCapRawWrite = "raw.write"
 
-	// Proxy capabilities cover the user-built Proxy Servers graph
-	// (listeners, switches, middleware, handlers).
-	SnapshotCapProxyRead   = "proxy.read"
-	SnapshotCapProxyManage = "proxy.manage"
-
 	// Registry capabilities cover the artifact-registry feature
 	// (Go modules, NPM, Docker/OCI, Helm, Cargo, Maven, PyPI).
 	SnapshotCapRegistryRead   = "registry.read"
@@ -41,8 +36,6 @@ type SnapshotCapability struct {
 var SnapshotKnownCapabilities = []SnapshotCapability{
 	{SnapshotCapRawRead, "Raw Files Read", "Browse and download raw files from mounted filesystems"},
 	{SnapshotCapRawWrite, "Raw Files Write", "Upload, delete, rename, copy and move raw files"},
-	{SnapshotCapProxyRead, "Proxy Read", "View configured proxy servers, their pipelines, live status and run test requests against them"},
-	{SnapshotCapProxyManage, "Proxy Manage", "Create, edit and delete proxy server graphs (listeners, middleware, handlers)"},
 	{SnapshotCapRegistryRead, "Registry Read", "Browse and pull artifacts from configured registries (Go modules, NPM packages, Docker/OCI images)"},
 	{SnapshotCapRegistryWrite, "Registry Write", "Publish and push artifacts to local registries"},
 	{SnapshotCapRegistryDelete, "Registry Delete", "Remove tags, versions and manifests from registries"},

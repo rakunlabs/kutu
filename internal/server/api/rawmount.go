@@ -42,6 +42,9 @@ func (a *api) reloadRawMounts(ctx context.Context) {
 		return
 	}
 	a.rawHandler.ReloadFromMounts(mounts)
+	// Serve shares resolve against the live mount table, so a mount
+	// change must re-resolve them too.
+	a.reconcileServe(ctx)
 }
 
 // listRawMountConfigs returns the full persisted config for every raw

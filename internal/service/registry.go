@@ -39,9 +39,8 @@ package service
 // that don't use the feature carry zero bytes for it.
 type RegistrySettings struct {
 	// Disabled is the deployment-wide feature flag for the artifact
-	// registry. Same shape and semantics as VaultSettings.Disabled
-	// and ProxySettings.Disabled (zero-value = enabled, preserving
-	// backward compatibility with pre-flag rows). When true:
+	// registry (zero-value = enabled, preserving backward
+	// compatibility with pre-flag rows). When true:
 	//
 	//   - The SPA hides the Registries link from navigation.
 	//   - /api/v1/registries/* admin endpoints respond 404.

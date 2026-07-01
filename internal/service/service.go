@@ -13,7 +13,6 @@ import (
 // Meta keys for singleton config stored in kutu_meta.
 const (
 	metaRegistryDisabled = "registry_disabled"
-	metaProxyDisabled    = "proxy_disabled"
 	metaEventLogDisabled = "event_log_disabled"
 	metaEncVerifier      = "encryption_verifier"
 )
@@ -53,16 +52,6 @@ func (s *Service) RegistryEnabled(ctx context.Context) bool {
 // SetRegistryDisabled toggles the registry feature flag.
 func (s *Service) SetRegistryDisabled(ctx context.Context, disabled bool) error {
 	return s.store.SetMeta(ctx, metaRegistryDisabled, disabled)
-}
-
-// ProxyEnabled reports whether the user-built proxy feature is on.
-func (s *Service) ProxyEnabled(ctx context.Context) bool {
-	return !s.boolFlag(ctx, metaProxyDisabled)
-}
-
-// SetProxyDisabled toggles the proxy feature flag.
-func (s *Service) SetProxyDisabled(ctx context.Context, disabled bool) error {
-	return s.store.SetMeta(ctx, metaProxyDisabled, disabled)
 }
 
 // EventLogEnabled reports whether the built-in event log is on (default).
@@ -229,48 +218,6 @@ func (s *Service) UpdateRawMount(ctx context.Context, m *RawMountEntry) error {
 
 func (s *Service) DeleteRawMount(ctx context.Context, prefix string) error {
 	return s.store.DeleteRawMount(ctx, prefix)
-}
-
-// ── proxy ──
-
-func (s *Service) ListProxyListeners(ctx context.Context, q *query.Query) ([]ProxyListener, error) {
-	return s.store.ListProxyListeners(ctx, q)
-}
-
-func (s *Service) GetProxyListener(ctx context.Context, id string) (*ProxyListener, error) {
-	return s.store.GetProxyListener(ctx, id)
-}
-
-func (s *Service) CreateProxyListener(ctx context.Context, l *ProxyListener) error {
-	return s.store.CreateProxyListener(ctx, l)
-}
-
-func (s *Service) UpdateProxyListener(ctx context.Context, l *ProxyListener) error {
-	return s.store.UpdateProxyListener(ctx, l)
-}
-
-func (s *Service) DeleteProxyListener(ctx context.Context, id string) error {
-	return s.store.DeleteProxyListener(ctx, id)
-}
-
-func (s *Service) ListProxyServers(ctx context.Context, q *query.Query) ([]ProxyServer, error) {
-	return s.store.ListProxyServers(ctx, q)
-}
-
-func (s *Service) GetProxyServer(ctx context.Context, id string) (*ProxyServer, error) {
-	return s.store.GetProxyServer(ctx, id)
-}
-
-func (s *Service) CreateProxyServer(ctx context.Context, srv *ProxyServer) error {
-	return s.store.CreateProxyServer(ctx, srv)
-}
-
-func (s *Service) UpdateProxyServer(ctx context.Context, srv *ProxyServer) error {
-	return s.store.UpdateProxyServer(ctx, srv)
-}
-
-func (s *Service) DeleteProxyServer(ctx context.Context, id string) error {
-	return s.store.DeleteProxyServer(ctx, id)
 }
 
 // ── hooks ──
