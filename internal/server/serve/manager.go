@@ -1,8 +1,8 @@
 // Package serve wires kutu's built-in file-serving servers (FTP, SFTP,
-// TFTP, WebDAV) to the persisted ServeSettings and the live raw-mount
-// table. A single Manager owns the four servers; Reconcile is called at
-// boot and after every settings / raw-mount mutation to bring the
-// running servers in line with the desired configuration.
+// TFTP, WebDAV, S3) to the persisted ServeSettings and the live
+// raw-mount table. A single Manager owns the servers; Reconcile is
+// called at boot and after every settings / raw-mount mutation to bring
+// the running servers in line with the desired configuration.
 //
 // Shares are resolved against the raw-mount handler on every reconcile,
 // so a share that points at "data/releases" serves the live filesystem
@@ -21,6 +21,7 @@ import (
 
 	"github.com/rakunlabs/kutu/internal/rawfs"
 	"github.com/rakunlabs/kutu/internal/serve/ftpserve"
+	"github.com/rakunlabs/kutu/internal/serve/s3serve"
 	"github.com/rakunlabs/kutu/internal/serve/sftpserve"
 	"github.com/rakunlabs/kutu/internal/serve/tftpserve"
 	"github.com/rakunlabs/kutu/internal/serve/webdavserve"
@@ -35,6 +36,7 @@ const (
 	defaultSFTPPort   = 2222
 	defaultTFTPPort   = 69
 	defaultWebDAVPort = 9119
+	defaultS3Port     = 9000
 )
 
 // MountResolver resolves a raw-mount prefix to its live filesystem. The
@@ -68,11 +70,13 @@ type Manager struct {
 	sftp   *sftpserve.Server
 	tftp   *tftpserve.Server
 	webdav *webdavserve.Server
+	s3     *s3serve.Server
 
 	ftpCancel    context.CancelFunc
 	sftpCancel   context.CancelFunc
 	tftpCancel   context.CancelFunc
 	webdavCancel context.CancelFunc
+	s3Cancel     context.CancelFunc
 
 	// Last applied bind config per protocol, used to decide between a
 	// cheap hot share/user update and a full rebind.
@@ -80,6 +84,7 @@ type Manager struct {
 	sftpCfg   service.SFTPServeSettings
 	tftpCfg   service.TFTPServeSettings
 	webdavCfg service.WebDAVServeSettings
+	s3Cfg     service.S3ServeSettings
 
 	status map[string]Status
 }
@@ -113,6 +118,7 @@ func (m *Manager) Reconcile(cfg *service.ServeSettings) {
 	m.reconcileSFTP(cfg.SFTP, shares, users)
 	m.reconcileTFTP(cfg.TFTP, shares)
 	m.reconcileWebDAV(cfg.WebDAV, shares, users)
+	m.reconcileS3(cfg.S3, shares, users)
 }
 
 // Status returns a stable-ordered snapshot of each protocol's runtime
@@ -120,7 +126,7 @@ func (m *Manager) Reconcile(cfg *service.ServeSettings) {
 func (m *Manager) Status() []Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	order := []string{"ftp", "sftp", "tftp", "webdav"}
+	order := []string{"ftp", "sftp", "tftp", "webdav", "s3"}
 	out := make([]Status, 0, len(order))
 	for _, p := range order {
 		if st, ok := m.status[p]; ok {
@@ -140,6 +146,7 @@ func (m *Manager) Stop() {
 	m.stopSFTP()
 	m.stopTFTP()
 	m.stopWebDAV()
+	m.stopS3()
 }
 
 // ── FTP ──
@@ -346,6 +353,57 @@ func (m *Manager) stopWebDAV() {
 	if m.webdav != nil {
 		m.webdav.Stop()
 		m.webdav = nil
+	}
+}
+
+// ── S3 ──
+
+func (m *Manager) reconcileS3(cfg service.S3ServeSettings, shares []ftpserve.Share, users []ftpserve.User) {
+	st := Status{Protocol: "s3", Enabled: cfg.Enabled, Address: tcpAddr(cfg.Host, cfg.Port, defaultS3Port)}
+
+	if m.s3 != nil && m.s3Cfg == cfg && cfg.Enabled {
+		m.s3.UpdateShares(shares)
+		m.s3.UpdateUsers(users)
+		st.Running = true
+		m.status["s3"] = st
+		return
+	}
+
+	m.stopS3()
+	m.s3Cfg = cfg
+	if !cfg.Enabled {
+		m.status["s3"] = st
+		return
+	}
+	if err := preflightTCP(st.Address); err != nil {
+		st.Error = err.Error()
+		m.status["s3"] = st
+		slog.Warn("S3 server not started", "address", st.Address, "error", err)
+		return
+	}
+
+	srv, err := s3serve.NewServer(&cfg, shares, users)
+	if err != nil {
+		st.Error = err.Error()
+		m.status["s3"] = st
+		return
+	}
+	ctx, cancel := context.WithCancel(m.appCtx)
+	srv.Start(ctx)
+	m.s3 = srv
+	m.s3Cancel = cancel
+	st.Running = true
+	m.status["s3"] = st
+}
+
+func (m *Manager) stopS3() {
+	if m.s3Cancel != nil {
+		m.s3Cancel()
+		m.s3Cancel = nil
+	}
+	if m.s3 != nil {
+		m.s3.Stop()
+		m.s3 = nil
 	}
 }
 

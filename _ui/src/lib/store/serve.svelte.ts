@@ -1,6 +1,6 @@
 // File-serving store — manages the single ServeSettings document that
-// drives kutu's built-in FTP / SFTP / TFTP / WebDAV servers, plus the
-// live per-protocol runtime status. All persistence goes through
+// drives kutu's built-in FTP / SFTP / TFTP / WebDAV / S3 servers, plus
+// the live per-protocol runtime status. All persistence goes through
 // /api/v1/serve*.
 //
 // Saving reconciles the running servers server-side, so after an update
@@ -17,6 +17,7 @@ function emptySettings(): ServeSettings {
     sftp: { enabled: false },
     tftp: { enabled: false },
     webdav: { enabled: false },
+    s3: { enabled: false },
     users: [],
     shares: [],
   };
@@ -79,6 +80,7 @@ function normalize(s: ServeSettings | null | undefined): ServeSettings {
     sftp: { ...base.sftp, ...s.sftp },
     tftp: { ...base.tftp, ...s.tftp },
     webdav: { ...base.webdav, ...s.webdav },
+    s3: { ...base.s3, ...s.s3 },
     users: s.users ?? [],
     shares: s.shares ?? [],
   };

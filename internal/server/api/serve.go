@@ -125,8 +125,26 @@ func validateServeSettings(cfg *service.ServeSettings) error {
 	// A server with no users accepts no connections (except TFTP, which
 	// is anonymous). Warn early only when a protocol that needs auth is
 	// enabled without any users.
-	if len(cfg.Users) == 0 && (cfg.FTP.Enabled || cfg.SFTP.Enabled || cfg.WebDAV.Enabled) {
-		return errBadRequest("FTP / SFTP / WebDAV require at least one user; add a user or disable those protocols")
+	if len(cfg.Users) == 0 && (cfg.FTP.Enabled || cfg.SFTP.Enabled || cfg.WebDAV.Enabled || cfg.S3.Enabled) {
+		return errBadRequest("FTP / SFTP / WebDAV / S3 require at least one user; add a user or disable those protocols")
+	}
+
+	// S3 SigV4 needs the plaintext secret (the password); a key-only
+	// user cannot authenticate against the S3 endpoint.
+	if cfg.S3.Enabled {
+		if (cfg.S3.TLSCertPEM == "") != (cfg.S3.TLSKeyPEM == "") {
+			return errBadRequest("S3 TLS requires both a certificate and a key")
+		}
+		hasSecret := false
+		for i := range cfg.Users {
+			if cfg.Users[i].Password != "" {
+				hasSecret = true
+				break
+			}
+		}
+		if !hasSecret {
+			return errBadRequest("S3 requires at least one user with a password (used as the secret key)")
+		}
 	}
 	return nil
 }

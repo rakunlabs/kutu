@@ -945,9 +945,9 @@ export interface RawMountConfig {
   vercelBlob?: VercelBlobMountConfig;
 }
 
-// ── File serving (FTP / SFTP / TFTP / WebDAV) ──
+// ── File serving (FTP / SFTP / TFTP / WebDAV / S3) ──
 // Mirrors the Go structs in internal/service/settings_feature.go +
-// service/serve.go. A single ServeSettings document drives the four
+// service/serve.go. A single ServeSettings document drives the
 // built-in servers; the user + share lists are shared across them.
 
 // FTPServeSettings mirrors service.FTPServeSettings.
@@ -988,6 +988,17 @@ export interface WebDAVServeSettings {
   prefix?: string;
 }
 
+// S3ServeSettings mirrors service.S3ServeSettings. Shares appear as
+// buckets; a user's username/password act as access/secret key.
+export interface S3ServeSettings {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+  region?: string;
+  tls_cert_pem?: string;
+  tls_key_pem?: string;
+}
+
 // ServeUser mirrors service.FTPUserEntry.
 export interface ServeUser {
   username: string;
@@ -1013,6 +1024,7 @@ export interface ServeSettings {
   sftp: SFTPServeSettings;
   tftp: TFTPServeSettings;
   webdav: WebDAVServeSettings;
+  s3: S3ServeSettings;
   users?: ServeUser[];
   shares?: ServeShare[];
 }

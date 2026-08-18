@@ -1,6 +1,6 @@
 <script lang="ts">
  // File-serving panel — operator-facing config for kutu's built-in
- // FTP / SFTP / TFTP / WebDAV servers. The whole document (protocol
+ // FTP / SFTP / TFTP / WebDAV / S3 servers. The whole document (protocol
  // settings + the shared user & share lists) is edited as one draft and
  // persisted with a single Save, which reconciles the running servers
  // server-side.
@@ -8,8 +8,10 @@
  // Shares point at raw-mount paths ("<mount-prefix>" or
  // "<mount-prefix>/<sub/path>"); a datalist of the configured mount
  // prefixes is offered so the operator picks valid backends. Users
- // authenticate FTP / SFTP / WebDAV (TFTP is anonymous + read-only).
- import { Server, Globe, HardDrive, Network, Plus, Trash2, Users, FolderOpen } from 'lucide-svelte';
+ // authenticate FTP / SFTP / WebDAV / S3 (TFTP is anonymous +
+ // read-only). For S3, each share is a bucket and username/password
+ // double as the SigV4 access/secret key pair.
+ import { Server, Globe, HardDrive, Network, Cloud, Plus, Trash2, Users, FolderOpen } from 'lucide-svelte';
  import type { ServeSettings, ServeStatus, ServeUser, ServeShare } from '@/lib/types/config';
  import { serveStore } from '@/lib/store/serve.svelte';
  import { rawMountsStore } from '@/lib/store/rawmounts.svelte';
@@ -82,6 +84,7 @@
   { key: 'sftp', label: 'SFTP (SSH)', icon: Network, defPort: 2222 },
   { key: 'tftp', label: 'TFTP', icon: HardDrive, defPort: 69 },
   { key: 'webdav', label: 'WebDAV', icon: Globe, defPort: 9119 },
+  { key: 's3', label: 'S3 API', icon: Cloud, defPort: 9000 },
  ] as const;
 </script>
 
@@ -93,8 +96,9 @@
     File serving
    </h2>
    <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">
-    Expose raw mounts over <strong>FTP</strong>, <strong>SFTP</strong>, <strong>TFTP</strong> and <strong>WebDAV</strong>.
+    Expose raw mounts over <strong>FTP</strong>, <strong>SFTP</strong>, <strong>TFTP</strong>, <strong>WebDAV</strong> and the <strong>S3 API</strong>.
     Shares select which mount paths are served; users provide the credentials (TFTP is anonymous and read-only).
+    Over S3, shares appear as buckets and a user's username/password act as the access/secret key pair.
    </p>
   </div>
   <div class="flex items-center gap-2 shrink-0">
@@ -170,6 +174,13 @@
        </p>
       {:else if p.key === 'webdav'}
        <label class={labelCls + ' col-span-2'}>URL prefix<input type="text" class={inputCls + ' font-mono'} bind:value={draft.webdav.prefix} placeholder="/" /></label>
+      {:else if p.key === 's3'}
+       <label class={labelCls}>Region<input type="text" class={inputCls + ' font-mono'} bind:value={draft.s3.region} placeholder="us-east-1" /></label>
+       <p class="text-[11px] text-slate-400 dark:text-slate-500 self-end pb-1">
+        Path-style only: <code class="font-mono">http://host:port/&lt;share&gt;/&lt;key&gt;</code>
+       </p>
+       <label class={labelCls + ' col-span-2'}>TLS certificate (PEM, optional)<textarea class={inputCls + ' font-mono'} rows="2" bind:value={draft.s3.tls_cert_pem} placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+       <label class={labelCls + ' col-span-2'}>TLS private key (PEM, optional)<textarea class={inputCls + ' font-mono'} rows="2" bind:value={draft.s3.tls_key_pem} placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
       {/if}
      </div>
     {/if}
@@ -245,7 +256,7 @@
 
   {#if (draft.users ?? []).length === 0}
    <p class="text-xs text-slate-400 dark:text-slate-500 border border-dashed border-slate-200 dark:border-warm-700 rounded-lg p-4 text-center">
-    No users yet. FTP / SFTP / WebDAV need at least one user to accept connections.
+    No users yet. FTP / SFTP / WebDAV / S3 need at least one user to accept connections.
    </p>
   {:else}
    <div class="flex flex-col gap-3">

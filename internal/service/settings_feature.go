@@ -100,6 +100,18 @@ type WebDAVServeSettings struct {
 	Prefix  string `json:"prefix,omitempty"`
 }
 
+// S3ServeSettings configures the built-in S3-compatible server (stored in DB).
+// Shares are exposed as buckets; users authenticate with SigV4 where the
+// username is the access key and the password is the secret key.
+type S3ServeSettings struct {
+	Enabled    bool   `json:"enabled"`
+	Port       int    `json:"port,omitempty"`
+	Host       string `json:"host,omitempty"`
+	Region     string `json:"region,omitempty"`
+	TLSCertPEM string `json:"tls_cert_pem,omitempty"`
+	TLSKeyPEM  string `json:"tls_key_pem,omitempty"`
+}
+
 // FTPUserEntry defines an FTP user account stored in settings.
 type FTPUserEntry struct {
 	Username       string   `json:"username"`
@@ -118,17 +130,19 @@ type FTPShareEntry struct {
 }
 
 // ServeSettings is the aggregate configuration for kutu's built-in file
-// serving (FTP / SFTP / TFTP / WebDAV). It is persisted as a single
+// serving (FTP / SFTP / TFTP / WebDAV / S3). It is persisted as a single
 // JSONB singleton in kutu_meta and edited as a whole from the UI. The
 // Users and Shares lists are shared across the protocols: shares define
 // which raw-mount paths are exposed and users provide the credentials
-// the FTP / SFTP / WebDAV servers authenticate against (TFTP is
-// anonymous by protocol design).
+// the FTP / SFTP / WebDAV / S3 servers authenticate against (TFTP is
+// anonymous by protocol design). For S3, shares appear as buckets and a
+// user's username/password act as the access/secret key pair.
 type ServeSettings struct {
 	FTP    FTPServeSettings    `json:"ftp"`
 	SFTP   SFTPServeSettings   `json:"sftp"`
 	TFTP   TFTPServeSettings   `json:"tftp"`
 	WebDAV WebDAVServeSettings `json:"webdav"`
+	S3     S3ServeSettings     `json:"s3"`
 	Users  []FTPUserEntry      `json:"users,omitempty"`
 	Shares []FTPShareEntry     `json:"shares,omitempty"`
 }

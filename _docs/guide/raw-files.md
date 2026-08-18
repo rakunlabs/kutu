@@ -85,14 +85,36 @@ When at least one raw mount exists, a **Files** link appears in the navigation b
 
 ## Other protocols
 
-The same raw mounts can also be served over FTP, SFTP, TFTP, and WebDAV. Each protocol has its own listener that you enable from **Settings**:
+The same raw mounts can also be served over FTP, SFTP, TFTP, WebDAV, and the S3 API. Each protocol has its own listener that you enable from **Settings**:
 
 - **FTP / FTPS** — under `Settings → FTP Server`. Pick a port, optional TLS, anonymous mode, and which mounts to expose.
 - **SFTP** — under `Settings → SFTP Server`. Generate or upload a host key. Authentication uses pika usernames + passwords.
 - **TFTP** — under `Settings → TFTP Server`. UDP, no auth — meant for things like network-boot images on a trusted segment.
 - **WebDAV** — under `Settings → WebDAV Server`. Uses HTTP basic auth backed by the same identity pool.
+- **S3 API** — under `Settings → File serving`. An S3-compatible endpoint (default port `9000`): every share appears as a bucket and a user's username/password act as the SigV4 access/secret key pair.
 
-All four protocols read from and (where supported) write to the same set of raw mounts, with the same scope checks.
+All five protocols read from and (where supported) write to the same set of raw mounts, with the same scope checks.
+
+### S3 endpoint
+
+The built-in S3 server speaks the standard S3 REST API with SigV4 authentication (header and presigned), so the AWS CLI, MinIO `mc`, rclone, and any S3 SDK work out of the box. Only path-style addressing is supported (`http://host:9000/<share>/<key>`).
+
+```sh
+# AWS CLI
+aws --endpoint-url http://localhost:9000 s3 ls
+aws --endpoint-url http://localhost:9000 s3 cp big.iso s3://releases/
+aws --endpoint-url http://localhost:9000 s3 sync ./dist s3://releases/v2/
+
+# MinIO client
+mc alias set kutu http://localhost:9000 <username> <password>
+mc ls kutu/releases
+```
+
+Supported operations: ListBuckets, HeadBucket, GetBucketLocation, ListObjects (V1/V2, `/` delimiter), Get/Head/Put/Delete/CopyObject, batch DeleteObjects, and multipart uploads (streaming `aws-chunked` payloads included — large AWS CLI uploads just work). Bucket create/delete is managed through kutu shares, and read-only users/shares reject writes with `AccessDenied`.
+
+Notes:
+- ETags are real content MD5s for uploads but synthesized surrogates in listings — use size/mtime-based sync (the default for most tools) rather than `--checksum` modes.
+- Buckets follow S3 naming rules best when share names are lowercase.
 
 ## Hooks on file changes
 
