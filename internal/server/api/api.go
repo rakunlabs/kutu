@@ -16,6 +16,7 @@ import (
 	"github.com/rakunlabs/kutu/internal/hook"
 	"github.com/rakunlabs/kutu/internal/registry"
 	"github.com/rakunlabs/kutu/internal/server/serve"
+	"github.com/rakunlabs/kutu/internal/server/vhost"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
@@ -41,6 +42,7 @@ type api struct {
 	rawHandler  *RawHandler
 	serveMgr    *serve.Manager
 	registryMgr *registry.Manager
+	vhostMgr    *vhost.Manager
 	dispatcher  *hook.Dispatcher
 	appCtx      context.Context
 }
@@ -59,6 +61,7 @@ func Handle(
 	rawHandler *RawHandler,
 	serveMgr *serve.Manager,
 	registryMgr *registry.Manager,
+	vhostMgr *vhost.Manager,
 	dispatcher *hook.Dispatcher,
 ) error {
 	a := &api{
@@ -67,9 +70,15 @@ func Handle(
 		rawHandler:  rawHandler,
 		serveMgr:    serveMgr,
 		registryMgr: registryMgr,
+		vhostMgr:    vhostMgr,
 		dispatcher:  dispatcher,
 		appCtx:      context.Background(),
 	}
+
+	// Publish the configured registry listeners onto the shared vhost
+	// layer at boot; every later registry mutation re-publishes via
+	// reloadRegistry.
+	a.reconcileRegistryListeners(a.appCtx)
 
 	m.ErrorHandler(a.errorHandler)
 
@@ -151,6 +160,11 @@ func Handle(
 	// Docker GC (local registries only).
 	m.POST("/api/v1/registries/docker/{ns}/{repo}/gc", m.Wrap(a.runDockerGC))
 	m.GET("/api/v1/registries/docker/{ns}/{repo}/gc/estimate", m.Wrap(a.estimateDockerGC))
+
+	// Dedicated registry listeners (per-repo host/port/TLS endpoints).
+	m.GET("/api/v1/registries/listeners", m.Wrap(a.getRegistryListeners))
+	m.PUT("/api/v1/registries/listeners", m.Wrap(a.updateRegistryListeners))
+	m.GET("/api/v1/registries/listeners/status", m.Wrap(a.getRegistryListenerStatus))
 
 	// Generic per-repo operations. ada's router prefers a literal
 	// segment over a param and does NOT backtrack to a sibling param

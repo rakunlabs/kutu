@@ -45,21 +45,27 @@ func startTestServer(t *testing.T) (*minio.Client, string) {
 	}
 
 	port := freePort(t)
-	cfg := &service.S3ServeSettings{Enabled: true, Host: "127.0.0.1", Port: port}
+	cfg := &service.S3ServeSettings{Host: "127.0.0.1", Port: port}
 
 	srv, err := NewServer(cfg, shares, users)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	srv.Start(ctx)
+	// The production listener is owned by the vhost layer; tests bind
+	// the handler onto a plain http.Server directly.
+	endpoint := fmt.Sprintf("127.0.0.1:%d", port)
+	ln, err := net.Listen("tcp", endpoint)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	httpSrv := &http.Server{Handler: srv.Handler()}
+	go httpSrv.Serve(ln) //nolint:errcheck
 	t.Cleanup(func() {
-		cancel()
+		httpSrv.Close() //nolint:errcheck
 		srv.Stop()
 	})
 
-	endpoint := fmt.Sprintf("127.0.0.1:%d", port)
 	waitForListen(t, endpoint)
 
 	client, err := minio.New(endpoint, &minio.Options{

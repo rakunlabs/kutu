@@ -1,7 +1,13 @@
 // File-serving store — manages the single ServeSettings document that
-// drives kutu's built-in FTP / SFTP / TFTP / WebDAV / S3 servers, plus
-// the live per-protocol runtime status. All persistence goes through
-// /api/v1/serve*.
+// drives kutu's built-in file servers (any number of FTP / SFTP / TFTP /
+// WebDAV / S3 instances) plus the live per-instance runtime status. All
+// persistence goes through /api/v1/serve*.
+//
+// The document is one JSONB blob server-side, but the UI edits it in
+// slices (servers / shares / users), so besides the whole-document
+// save() there are partial helpers that replace one slice of the last
+// persisted document and PUT the result — that way saving a user never
+// sends along a half-edited server form.
 //
 // Saving reconciles the running servers server-side, so after an update
 // we re-load both the settings (to pick up a generated SFTP host key)
@@ -9,18 +15,10 @@
 
 import axios from 'axios';
 import { addToast } from './toast.svelte';
-import type { ServeSettings, ServeStatus } from '@/lib/types/config';
+import type { ServeSettings, ServeStatus, ServeServerEntry, ServeShare, ServeUser } from '@/lib/types/config';
 
 function emptySettings(): ServeSettings {
-  return {
-    ftp: { enabled: false },
-    sftp: { enabled: false },
-    tftp: { enabled: false },
-    webdav: { enabled: false },
-    s3: { enabled: false },
-    users: [],
-    shares: [],
-  };
+  return { servers: [], users: [], shares: [] };
 }
 
 let settings = $state<ServeSettings>(emptySettings());
@@ -28,6 +26,10 @@ let status = $state<ServeStatus[]>([]);
 let loaded = $state(false);
 let loading = $state(false);
 let saving = $state(false);
+
+function normalizeStatus(value: unknown): ServeStatus[] {
+  return Array.isArray(value) ? value : [];
+}
 
 async function load(): Promise<void> {
   loading = true;
@@ -38,7 +40,7 @@ async function load(): Promise<void> {
   if (cfgRes.status === 'fulfilled') {
     settings = normalize(cfgRes.value.data);
   }
-  if (stRes.status === 'fulfilled') status = stRes.value.data ?? [];
+  if (stRes.status === 'fulfilled') status = normalizeStatus(stRes.value.data);
   loaded = true;
   loading = false;
 }
@@ -46,7 +48,7 @@ async function load(): Promise<void> {
 async function refreshStatus(): Promise<void> {
   try {
     const res = await axios.get<ServeStatus[]>('/api/v1/serve/status');
-    status = res.data ?? [];
+    status = normalizeStatus(res.data);
   } catch {/* status is best-effort */}
 }
 
@@ -70,17 +72,32 @@ async function save(next: ServeSettings): Promise<boolean> {
   }
 }
 
+// snapshot returns a plain (non-reactive) deep copy of the persisted
+// document, ready to be sliced and PUT back.
+function snapshot(): ServeSettings {
+  return structuredClone($state.snapshot(settings)) as ServeSettings;
+}
+
+// ── partial saves: replace one slice of the persisted document ──
+
+async function saveServers(servers: ServeServerEntry[]): Promise<boolean> {
+  return save({ ...snapshot(), servers });
+}
+
+async function saveShares(shares: ServeShare[]): Promise<boolean> {
+  return save({ ...snapshot(), shares });
+}
+
+async function saveUsers(users: ServeUser[]): Promise<boolean> {
+  return save({ ...snapshot(), users });
+}
+
 // normalize fills in the optional list fields so the UI can bind to
 // them without null guards.
 function normalize(s: ServeSettings | null | undefined): ServeSettings {
-  const base = emptySettings();
-  if (!s) return base;
+  if (!s) return emptySettings();
   return {
-    ftp: { ...base.ftp, ...s.ftp },
-    sftp: { ...base.sftp, ...s.sftp },
-    tftp: { ...base.tftp, ...s.tftp },
-    webdav: { ...base.webdav, ...s.webdav },
-    s3: { ...base.s3, ...s.s3 },
+    servers: (s.servers ?? []).map(sv => ({ ...sv, shares: sv.shares ?? [] })),
     users: s.users ?? [],
     shares: s.shares ?? [],
   };
@@ -95,4 +112,7 @@ export const serveStore = {
   load,
   refreshStatus,
   save,
+  saveServers,
+  saveShares,
+  saveUsers,
 };

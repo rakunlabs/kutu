@@ -85,13 +85,16 @@ When at least one raw mount exists, a **Files** link appears in the navigation b
 
 ## Other protocols
 
-The same raw mounts can also be served over FTP, SFTP, TFTP, WebDAV, and the S3 API. Each protocol has its own listener that you enable from **Settings**:
+The same raw mounts can also be served over FTP, SFTP, TFTP, WebDAV, and the S3 API. Under **Settings → File serving** you configure three things:
 
-- **FTP / FTPS** — under `Settings → FTP Server`. Pick a port, optional TLS, anonymous mode, and which mounts to expose.
-- **SFTP** — under `Settings → SFTP Server`. Generate or upload a host key. Authentication uses pika usernames + passwords.
-- **TFTP** — under `Settings → TFTP Server`. UDP, no auth — meant for things like network-boot images on a trusted segment.
-- **WebDAV** — under `Settings → WebDAV Server`. Uses HTTP basic auth backed by the same identity pool.
-- **S3 API** — under `Settings → File serving`. An S3-compatible endpoint (default port `9000`): every share appears as a bucket and a user's username/password act as the SigV4 access/secret key pair.
+- **Servers** — any number of server instances, several of the same protocol on different ports included (e.g. two S3 endpoints, an internal and an external FTP). Each server has its own port, protocol-specific options (TLS, passive ports, host key, region, …) and exposes either **all shares or a picked subset** — so a share can be dedicated to, say, just your TFTP boot server.
+  - **FTP / FTPS** — port, optional TLS, passive port range / public IP.
+  - **SFTP** — host key (auto-generated and persisted if left empty).
+  - **TFTP** — UDP, no auth, read-only — meant for things like network-boot images on a trusted segment.
+  - **WebDAV** — HTTP basic auth, optional URL prefix.
+  - **S3 API** — an S3-compatible endpoint (default port `9000`): every share appears as a bucket and a user's username/password act as the SigV4 access/secret key pair.
+- **Shares** — a named mapping onto one or more raw-mount paths (`<mount-prefix>` or `<mount-prefix>/<sub/path>`), optionally read-only or mounted at `/`.
+- **Users** — the credential pool used by FTP / SFTP / WebDAV / S3 (TFTP is anonymous). A user can be limited to a subset of shares and marked read-only.
 
 All five protocols read from and (where supported) write to the same set of raw mounts, with the same scope checks.
 

@@ -77,6 +77,27 @@ async function postJSON<T>(url: string, body?: unknown): Promise<T> {
   return (await resp.json()) as T;
 }
 
+async function putJSON<T>(url: string, body: unknown): Promise<T> {
+  const resp = await fetch(url, {
+    ...fetchOpts,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const bodyText = await resp.text().catch(() => '');
+    let message = `HTTP ${resp.status}`;
+    try {
+      const parsed = JSON.parse(bodyText) as { message?: string };
+      if (parsed.message) message = parsed.message;
+    } catch {
+      if (bodyText) message = bodyText;
+    }
+    throw new RegistryAPIError(resp.status, message, bodyText);
+  }
+  return (await resp.json()) as T;
+}
+
 async function deleteNoContent(url: string): Promise<void> {
   const resp = await fetch(url, { ...fetchOpts, method: 'DELETE' });
   if (!resp.ok) {
@@ -98,6 +119,48 @@ async function getText(url: string): Promise<string> {
 /** GET /api/v1/registries → namespace tree. */
 export async function listRegistries(): Promise<{ namespaces: Namespace[] }> {
   return getJSON(`${basePath}/api/v1/registries`);
+}
+
+// ─── Dedicated listeners ───
+
+export interface RegistryListener {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  host?: string;
+  port: number;
+  hostname?: string;
+  namespace: string;
+  repo: string;
+  tls_cert_pem?: string;
+  tls_key_pem?: string;
+}
+
+export interface RegistryListenerStatus {
+  owner: string;
+  id: string;
+  name?: string;
+  address: string;
+  hostname?: string;
+  tls: boolean;
+  running: boolean;
+  shared?: boolean;
+  error?: string;
+}
+
+/** GET /api/v1/registries/listeners. */
+export async function listListeners(): Promise<{ listeners: RegistryListener[] }> {
+  return getJSON(`${basePath}/api/v1/registries/listeners`);
+}
+
+/** GET /api/v1/registries/listeners/status. */
+export async function listListenerStatus(): Promise<RegistryListenerStatus[]> {
+  return getJSON(`${basePath}/api/v1/registries/listeners/status`);
+}
+
+/** PUT /api/v1/registries/listeners. */
+export async function saveListeners(listeners: RegistryListener[]): Promise<{ listeners: RegistryListener[] }> {
+  return putJSON(`${basePath}/api/v1/registries/listeners`, { listeners });
 }
 
 /**

@@ -41,27 +41,6 @@ importers:
       '@comark/svelte':
         specifier: ^0.3.1
         version: 0.3.1(svelte@5.56.4)
-      '@fontsource/fira-code':
-        specifier: ^5.2.7
-        version: 5.2.7
-      '@fontsource/geist-mono':
-        specifier: ^5.2.7
-        version: 5.2.8
-      '@fontsource/ibm-plex-mono':
-        specifier: ^5.2.7
-        version: 5.2.7
-      '@fontsource/inconsolata':
-        specifier: ^5.2.8
-        version: 5.2.8
-      '@fontsource/jetbrains-mono':
-        specifier: ^5.2.8
-        version: 5.2.8
-      '@fontsource/roboto-mono':
-        specifier: ^5.2.9
-        version: 5.2.9
-      '@fontsource/source-code-pro':
-        specifier: ^5.2.7
-        version: 5.2.7
       '@uiw/codemirror-theme-dracula':
         specifier: ^4.25.9
         version: 4.25.10(@codemirror/language@6.12.4)(@codemirror/state@6.7.0)(@codemirror/view@6.43.4)
@@ -280,27 +259,6 @@ packages:
 
   '@emnapi/wasi-threads@1.2.2':
     resolution: {integrity: sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==}
-
-  '@fontsource/fira-code@5.2.7':
-    resolution: {integrity: sha512-tnB9NNund9TwIym8/7DMJe573nlPEQb+fKUV5GL8TBYXjIhDvL0D7mgmNVNQUPhXp+R7RylQeiBdkA4EbOHPGQ==}
-
-  '@fontsource/geist-mono@5.2.8':
-    resolution: {integrity: sha512-YqZUb3X42GjRaHkibUNyE8K4Rk9A6I9Ez81YpJYiuJN4ggmTW2ixoQpa9EWCPfXZtIsCQJTyrDoV9OJOZO/UcA==}
-
-  '@fontsource/ibm-plex-mono@5.2.7':
-    resolution: {integrity: sha512-MKAb8qV+CaiMQn2B0dIi1OV3565NYzp3WN5b4oT6LTkk+F0jR6j0ZN+5BKJiIhffDC3rtBULsYZE65+0018z9w==}
-
-  '@fontsource/inconsolata@5.2.8':
-    resolution: {integrity: sha512-lIZW+WOZYpUH91g9r6rYYhfTmptF3YPPM54ZOs8IYVeeL4SeiAu4tfj7mdr8llYEq31DLYgi6JtGIJa192gB0Q==}
-
-  '@fontsource/jetbrains-mono@5.2.8':
-    resolution: {integrity: sha512-6w8/SG4kqvIMu7xd7wt6x3idn1Qux3p9N62s6G3rfldOUYHpWcc2FKrqf+Vo44jRvqWj2oAtTHrZXEP23oSKwQ==}
-
-  '@fontsource/roboto-mono@5.2.9':
-    resolution: {integrity: sha512-iIeSyrRGoM15uIWqXslW1K9UFnUYfnCFNrNoWjXE0huO1L+hM0Jst0KNLuRc7P21xPpGL0bZouzYSX0Em9eyWg==}
-
-  '@fontsource/source-code-pro@5.2.7':
-    resolution: {integrity: sha512-7papq9TH94KT+S5VSY8cU7tFmwuGkIe3qxXRMscuAXH6AjMU+KJI75f28FzgBVDrlMfA0jjlTV4/x5+H5o/5EQ==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1896,20 +1854,6 @@ snapshots:
     dependencies:
       tslib: 2.8.1
     optional: true
-
-  '@fontsource/fira-code@5.2.7': {}
-
-  '@fontsource/geist-mono@5.2.8': {}
-
-  '@fontsource/ibm-plex-mono@5.2.7': {}
-
-  '@fontsource/inconsolata@5.2.8': {}
-
-  '@fontsource/jetbrains-mono@5.2.8': {}
-
-  '@fontsource/roboto-mono@5.2.9': {}
-
-  '@fontsource/source-code-pro@5.2.7': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

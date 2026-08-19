@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,73 +22,34 @@ import (
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
-// Server wraps an HTTP server that handles WebDAV requests.
+// Server handles WebDAV requests. It does not own a listener: the
+// shared vhost layer (internal/server/vhost) binds the port — possibly
+// shared with other virtual hosts — and dispatches matched requests to
+// Handler(). TLS and the bind address are vhost concerns.
 type Server struct {
-	httpSrv *http.Server
-	mu      sync.RWMutex
-	shares  []ftpserve.Share
-	users   []ftpserve.User
-	prefix  string
+	mu     sync.RWMutex
+	shares []ftpserve.Share
+	users  []ftpserve.User
+	prefix string
 }
 
 // NewServer creates a new WebDAV server with the given config, shares, and users.
 func NewServer(cfg *service.WebDAVServeSettings, shares []ftpserve.Share, users []ftpserve.User) (*Server, error) {
-	port := cfg.Port
-	if port == 0 {
-		port = 9119
-	}
-
-	host := cfg.Host
-	if host == "" {
-		host = "0.0.0.0"
-	}
-
 	prefix := cfg.Prefix
 	if prefix == "" {
 		prefix = "/"
 	}
 
-	s := &Server{
+	return &Server{
 		shares: shares,
 		users:  users,
 		prefix: prefix,
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleWebDAV)
-
-	s.httpSrv = &http.Server{
-		Addr:    net.JoinHostPort(host, strconv.Itoa(port)),
-		Handler: mux,
-	}
-
-	return s, nil
+	}, nil
 }
 
-// Start starts the WebDAV server in a goroutine.
-func (s *Server) Start(ctx context.Context) {
-	go func() {
-		slog.Info("starting WebDAV server", "addr", s.httpSrv.Addr)
-		if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("WebDAV server failed", "error", err)
-		}
-	}()
-
-	go func() {
-		<-ctx.Done()
-		slog.Info("shutting down WebDAV server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		s.httpSrv.Shutdown(shutdownCtx) //nolint:errcheck
-	}()
-}
-
-// Stop gracefully shuts down the WebDAV server.
-func (s *Server) Stop() {
-	slog.Info("stopping WebDAV server")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	s.httpSrv.Shutdown(shutdownCtx) //nolint:errcheck
+// Handler returns the WebDAV entry handler for the vhost layer.
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(s.handleWebDAV)
 }
 
 // UpdateShares replaces the shares served by the WebDAV server.
@@ -467,8 +426,10 @@ type davReadFile struct {
 
 var _ webdav.File = (*davReadFile)(nil)
 
-func (f *davReadFile) Read(p []byte) (int, error)              { return f.reader.Read(p) }
-func (f *davReadFile) Seek(offset int64, whence int) (int64, error) { return f.reader.Seek(offset, whence) }
+func (f *davReadFile) Read(p []byte) (int, error) { return f.reader.Read(p) }
+func (f *davReadFile) Seek(offset int64, whence int) (int64, error) {
+	return f.reader.Seek(offset, whence)
+}
 func (f *davReadFile) Close() error                             { return f.reader.Close() }
 func (f *davReadFile) Write(p []byte) (int, error)              { return 0, os.ErrInvalid }
 func (f *davReadFile) Readdir(count int) ([]os.FileInfo, error) { return nil, os.ErrInvalid }

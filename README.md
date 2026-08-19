@@ -14,7 +14,7 @@ Runs as one binary backed by PostgreSQL, with no authentication layer in front o
 
 - **Artifact registry** — npm, Go, Docker, Helm, Maven, PyPI and Cargo, proxying or hosting locally.
 - **Raw mounts** — browse and serve files from local disk, S3, FTP, SFTP, WebDAV or Vercel Blob.
-- **File serving** — expose those mounts over **FTP**, **SFTP**, **TFTP** and **WebDAV** with shared users and shares.
+- **File serving** — expose those mounts over **FTP**, **SFTP**, **TFTP**, **WebDAV** and an **S3-compatible API** with shared users and shares.
 - **Proxy** — build reverse-proxy graphs (listeners, middlewares, handlers) from the UI.
 - **Hooks** — emit file events to external targets.
 - **At-rest encryption** — secret values are sealed with a key you unlock from the UI.
@@ -60,12 +60,18 @@ Config is loaded as: defaults → config file → environment. Point at a file w
 
 ## File serving
 
-Configure the built-in FTP / SFTP / TFTP / WebDAV servers from **Settings → File serving**:
+Configure the built-in FTP / SFTP / TFTP / WebDAV / S3 servers from **Settings → File serving**:
 
 1. Add one or more **raw mounts** (Settings → Raw mounts).
 2. Create a **share** that points at a mount path, e.g. `data/releases`.
-3. Add a **user** (FTP / SFTP / WebDAV need credentials; TFTP is anonymous and read-only).
+3. Add a **user** (FTP / SFTP / WebDAV / S3 need credentials; TFTP is anonymous and read-only).
 4. Enable a protocol and **Save** — servers reconcile live, no restart needed.
+
+S3 and WebDAV servers can share a port with each other or with dedicated package-registry listeners when each endpoint has a different hostname. TLS certificates are optional, so these listeners also work behind a TLS-terminating reverse proxy.
+
+## Registry listeners
+
+Repositories remain available under `/registries/{namespace}/{repo}/...` on the main HTTP server. Use **Registries → Listeners** to additionally publish one repository at the root of a dedicated hostname or port. This supports Docker's required `/v2/...` root path, per-repository ports, shared-port virtual hosts, and optional per-hostname TLS.
 
 ## License
 

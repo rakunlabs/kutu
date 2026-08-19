@@ -10,110 +10,54 @@
 package s3serve
 
 import (
-	"context"
-	"crypto/tls"
 	"fmt"
-	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/rakunlabs/kutu/internal/rawfs"
 	"github.com/rakunlabs/kutu/internal/serve/ftpserve"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
-const defaultPort = 9000
-
-// Server wraps an HTTP server that handles S3 API requests.
+// Server handles S3 API requests. It does not own a listener: the
+// shared vhost layer (internal/server/vhost) binds the port — possibly
+// shared with other virtual hosts — and dispatches matched requests to
+// Handler(). TLS and the bind address are vhost concerns.
 type Server struct {
-	httpSrv *http.Server
-	mu      sync.RWMutex
-	shares  []ftpserve.Share
-	users   []ftpserve.User
-	region  string
-	useTLS  bool
+	mu     sync.RWMutex
+	shares []ftpserve.Share
+	users  []ftpserve.User
+	region string
 
 	uploads *uploadManager
 }
 
 // NewServer creates a new S3 server with the given config, shares, and users.
 func NewServer(cfg *service.S3ServeSettings, shares []ftpserve.Share, users []ftpserve.User) (*Server, error) {
-	port := cfg.Port
-	if port == 0 {
-		port = defaultPort
-	}
-
-	host := cfg.Host
-	if host == "" {
-		host = "0.0.0.0"
-	}
-
 	region := cfg.Region
 	if region == "" {
 		region = "us-east-1"
 	}
 
-	s := &Server{
+	return &Server{
 		shares:  shares,
 		users:   users,
 		region:  region,
 		uploads: newUploadManager(),
-	}
-
-	s.httpSrv = &http.Server{
-		Addr:    net.JoinHostPort(host, strconv.Itoa(port)),
-		Handler: http.HandlerFunc(s.handle),
-	}
-
-	if cfg.TLSCertPEM != "" || cfg.TLSKeyPEM != "" {
-		cert, err := tls.X509KeyPair([]byte(cfg.TLSCertPEM), []byte(cfg.TLSKeyPEM))
-		if err != nil {
-			return nil, fmt.Errorf("s3serve: loading TLS keypair: %w", err)
-		}
-		s.httpSrv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
-		s.useTLS = true
-	}
-
-	return s, nil
+	}, nil
 }
 
-// Start starts the S3 server in a goroutine.
-func (s *Server) Start(ctx context.Context) {
-	go func() {
-		slog.Info("starting S3 server", "addr", s.httpSrv.Addr, "tls", s.useTLS)
-		var err error
-		if s.useTLS {
-			err = s.httpSrv.ListenAndServeTLS("", "")
-		} else {
-			err = s.httpSrv.ListenAndServe()
-		}
-		if err != nil && err != http.ErrServerClosed {
-			slog.Error("S3 server failed", "error", err)
-		}
-	}()
-
-	go func() {
-		<-ctx.Done()
-		slog.Info("shutting down S3 server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		s.httpSrv.Shutdown(shutdownCtx) //nolint:errcheck
-		s.uploads.cleanup()
-	}()
+// Handler returns the S3 API entry handler for the vhost layer.
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(s.handle)
 }
 
-// Stop gracefully shuts down the S3 server.
+// Stop releases per-instance resources (pending multipart uploads).
+// The listener itself is owned and closed by the vhost layer.
 func (s *Server) Stop() {
-	slog.Info("stopping S3 server")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	s.httpSrv.Shutdown(shutdownCtx) //nolint:errcheck
 	s.uploads.cleanup()
 }
 

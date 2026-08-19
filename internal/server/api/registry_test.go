@@ -94,8 +94,29 @@ func TestHandleRegistersRoutesWithoutGreedyPanic(t *testing.T) {
 	t.Cleanup(cancel)
 	rh := NewRawHandler(nil, ctx, nil)
 
-	if err := Handle(ada.NewMux(), service.New(newMemStore()), Info{}, rh, nil, nil, nil); err != nil {
+	if err := Handle(ada.NewMux(), service.New(newMemStore()), Info{}, rh, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Handle: %v", err)
+	}
+}
+
+func TestRegistryListenerRoutes(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	rh := NewRawHandler(nil, ctx, nil)
+	server := ada.New()
+	if err := Handle(server.Mux, service.New(newMemStore()), Info{}, rh, nil, nil, nil, nil); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	for _, path := range []string{
+		"/api/v1/registries/listeners",
+		"/api/v1/registries/listeners/status",
+	} {
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200; body=%s", path, rec.Code, rec.Body.String())
+		}
 	}
 }
 
@@ -105,7 +126,7 @@ func TestRegistryAdminActionRoutesDoNotFallThroughToSPAFallback(t *testing.T) {
 	rh := NewRawHandler(nil, ctx, nil)
 
 	server := ada.New()
-	if err := Handle(server.Mux, service.New(newMemStore()), Info{}, rh, nil, nil, nil); err != nil {
+	if err := Handle(server.Mux, service.New(newMemStore()), Info{}, rh, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	server.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -58,27 +58,5 @@ export function gutterStylesFor(theme: EditorThemeMeta): {
   return { background: '#f6f8fa', color: '#57606a' };
 }
 
-// Curated list of monospace font stacks exposed in the Appearance UI.
-// Each entry's CSS family name corresponds to a face that's bundled
-// via @fontsource/* and imported in _ui/src/style/fonts.css — so the
-// font always renders correctly regardless of what the user has
-// installed locally. The `value` string is the exact `font-family`
-// declaration CodeMirror sets on .cm-content; the trailing fallback
-// chain ends with `monospace` so a missing face never produces a
-// proportional-font rendering.
-export const EDITOR_FONT_FAMILIES: { label: string; value: string }[] = [
-  // Geist Mono — Vercel's monospace, default for new users.
-  { label: 'Geist Mono',      value: "'Geist Mono', ui-monospace, monospace" },
-  { label: 'JetBrains Mono',  value: "'JetBrains Mono', ui-monospace, monospace" },
-  { label: 'Fira Code',       value: "'Fira Code', ui-monospace, monospace" },
-  { label: 'Source Code Pro', value: "'Source Code Pro', ui-monospace, monospace" },
-  { label: 'IBM Plex Mono',   value: "'IBM Plex Mono', ui-monospace, monospace" },
-  { label: 'Inconsolata',     value: "'Inconsolata', ui-monospace, monospace" },
-  { label: 'Roboto Mono',     value: "'Roboto Mono', ui-monospace, monospace" },
-  // System monospace — uses whatever the OS shows for ui-monospace
-  // (San Francisco Mono on macOS, Cascadia Mono on Windows, etc.).
-  { label: 'System Monospace', value: 'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace' },
-];
-
 export const EDITOR_FONT_SIZE_MIN = 8;
 export const EDITOR_FONT_SIZE_MAX = 48;

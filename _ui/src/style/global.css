@@ -1,11 +1,6 @@
 /* stylelint-disable-next-line import-notation */
 @import 'tailwindcss';
 
-/* Self-hosted monospace fonts for the code editor. See fonts.css for
-   the rationale — every face exposed in the Appearance > Font family
-   dropdown is bundled here so previews always render correctly. */
-@import './fonts.css';
-
 /* Tailwind v4 uses CSS-first config. Enable the `dark:` variant against
    a `.dark` class on a parent element. The prefs store toggles this
    class on <html> based on the user's app theme preference. */
@@ -26,6 +21,10 @@
    selected file highlights) where the navy would feel too quiet.
    ──────────────────────────────────────────────────────────────────────── */
 @theme {
+  /* Browser/OS fonts only: no font files are downloaded by the app. */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
   /* Navy — primary actions, focus rings, links. */
   --color-brand-50:  #eaf0f7;
   --color-brand-100: #cbd8e8;
@@ -143,6 +142,7 @@ body {
    wherever a designer wants a different tone. */
 body {
   color: rgb(30 41 59); /* slate-800 */
+  font-family: var(--font-sans);
 }
 .dark body {
   color: rgb(241 245 249); /* slate-100 */

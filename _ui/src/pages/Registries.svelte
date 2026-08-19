@@ -28,7 +28,7 @@
   import {
     Loader2,
     Copy, ChevronRight, FolderTree, Trash2, Plus, Pencil, X, RotateCw,
-    Eye, EyeOff, Search,
+    Eye, EyeOff, Search, RadioTower,
     // These four are used directly in the template for per-protocol
     // section headers and empty states; iconFor() / kindIcon() in
     // registry/utils.ts cover the badge-icon callsites.
@@ -39,6 +39,7 @@
   import * as registryAPI from '@/lib/store/registry.svelte';
   import Modal from '@/lib/components/Modal.svelte';
   import PackageDetailPanel from '@/lib/components/registry/PackageDetailPanel.svelte';
+  import RegistryListenersPanel from '@/lib/components/registry/RegistryListenersPanel.svelte';
   import type {
     CargoCrateEntry,
     DockerEntry,
@@ -66,6 +67,7 @@
   } from '@/lib/components/registry/utils';
 
   let booted = $state(false);
+  let showListeners = $state(false);
   let settingsLoadRequested = $state(false);
   let namespaces = $state<Namespace[]>([]);
   let selectedNS = $state<string | null>(null);
@@ -926,6 +928,16 @@
       </div>
       {#if canAdmin}
         <button
+          class="flex items-center gap-1 text-xs px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+          class:bg-warm-100={showListeners}
+          class:dark:bg-warm-800={showListeners}
+          onclick={() => { showListeners = true; mode = null; }}
+          title="Publish repositories on dedicated ports or hostnames"
+        >
+          <RadioTower size={12} />
+          Listeners
+        </button>
+        <button
           class="flex items-center gap-1 text-xs px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
           onclick={openNewNamespace}
           title="Create a new namespace"
@@ -937,7 +949,9 @@
     </div>
   </header>
 
-  {#if !booted}
+  {#if showListeners}
+    <RegistryListenersPanel {namespaces} {canAdmin} onClose={() => { showListeners = false; }} />
+  {:else if !booted}
     <div class="flex-1 flex items-center justify-center text-warm-500">
       <Loader2 size={20} class="animate-spin mr-2" />
       Loading registries…

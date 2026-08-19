@@ -255,6 +255,10 @@ func (a *api) reloadRegistry(ctx context.Context) {
 	}
 	rs := a.svc.GetRegistrySettings(ctx)
 	a.registryMgr.Reload(ctx, rs)
+	// Dedicated listeners resolve their target repo per request, but a
+	// re-publish keeps their vhost bindings in sync (e.g. feature flag
+	// flips, listener-list edits routed through postSettings).
+	a.reconcileRegistryListeners(ctx)
 }
 
 // serveRegistry is the entry handler for "/registries/*" on the

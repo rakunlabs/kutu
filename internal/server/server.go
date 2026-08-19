@@ -25,6 +25,7 @@ import (
 	"github.com/rakunlabs/kutu/internal/server/api"
 	"github.com/rakunlabs/kutu/internal/server/lockgate"
 	"github.com/rakunlabs/kutu/internal/server/serve"
+	"github.com/rakunlabs/kutu/internal/server/vhost"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
@@ -49,19 +50,36 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 	}
 	rawHandler := api.NewRawHandlerFromMounts(ctx, mounts, dispatcher)
 
-	// ── File serving (FTP / SFTP / TFTP / WebDAV) ──
+	// ── Shared HTTP listeners (virtual hosts) ──
+	// S3 / WebDAV serve instances and dedicated registry listeners
+	// publish onto this layer; endpoints on the same port are routed
+	// by the request's Host header, with optional per-hostname TLS
+	// certificates selected via SNI.
+	vhostMgr := vhost.NewManager(ctx)
+	defer vhostMgr.Stop()
+
+	// ── File serving (FTP / SFTP / TFTP / WebDAV / S3) ──
 	// Shares resolve against the live raw-mount table above. A generated
-	// SFTP host key is persisted back into the serve settings so it
+	// SFTP host key is persisted back onto its server entry so it
 	// survives restarts.
-	serveMgr := serve.NewManager(ctx, rawHandler, func(pem string) {
+	serveMgr := serve.NewManager(ctx, rawHandler, vhostMgr, func(serverID, pem string) {
 		cfg, err := svc.GetServeSettings(ctx)
 		if err != nil {
 			slog.Warn("persist generated SFTP host key: load serve settings", "error", err)
 			return
 		}
-		cfg.SFTP.HostKeyPEM = pem
-		if err := svc.SetServeSettings(ctx, cfg); err != nil {
-			slog.Warn("persist generated SFTP host key", "error", err)
+		for i := range cfg.Servers {
+			if cfg.Servers[i].ID != serverID {
+				continue
+			}
+			if cfg.Servers[i].SFTP == nil {
+				cfg.Servers[i].SFTP = &service.SFTPServeSettings{}
+			}
+			cfg.Servers[i].SFTP.HostKeyPEM = pem
+			if err := svc.SetServeSettings(ctx, cfg); err != nil {
+				slog.Warn("persist generated SFTP host key", "server", serverID, "error", err)
+			}
+			return
 		}
 	})
 	if serveCfg, serr := svc.GetServeSettings(ctx); serr != nil {
@@ -95,7 +113,7 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 		actorMiddleware,      // capture the optional X-User header for audit
 	)
 
-	if err := api.Handle(server.Mux, svc, info, rawHandler, serveMgr, registryMgr, dispatcher); err != nil {
+	if err := api.Handle(server.Mux, svc, info, rawHandler, serveMgr, registryMgr, vhostMgr, dispatcher); err != nil {
 		return err
 	}
 

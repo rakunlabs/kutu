@@ -947,12 +947,15 @@ export interface RawMountConfig {
 
 // ── File serving (FTP / SFTP / TFTP / WebDAV / S3) ──
 // Mirrors the Go structs in internal/service/settings_feature.go +
-// service/serve.go. A single ServeSettings document drives the
-// built-in servers; the user + share lists are shared across them.
+// service/serve.go. A single ServeSettings document holds the list of
+// server instances (any number, any ports) plus the shared user +
+// share pools; each server exposes all shares or its own named subset.
+
+// ServeProtocol is the closed set of protocols a server instance can use.
+export type ServeProtocol = 'ftp' | 'sftp' | 'tftp' | 'webdav' | 's3';
 
 // FTPServeSettings mirrors service.FTPServeSettings.
 export interface FTPServeSettings {
-  enabled: boolean;
   port?: number;
   host?: string;
   public_ip?: string;
@@ -966,7 +969,6 @@ export interface FTPServeSettings {
 
 // SFTPServeSettings mirrors service.SFTPServeSettings.
 export interface SFTPServeSettings {
-  enabled: boolean;
   port?: number;
   host?: string;
   host_key_path?: string;
@@ -975,28 +977,46 @@ export interface SFTPServeSettings {
 
 // TFTPServeSettings mirrors service.TFTPServeSettings.
 export interface TFTPServeSettings {
-  enabled: boolean;
   port?: number;
   host?: string;
 }
 
 // WebDAVServeSettings mirrors service.WebDAVServeSettings.
 export interface WebDAVServeSettings {
-  enabled: boolean;
   port?: number;
   host?: string;
+  hostname?: string;
   prefix?: string;
+  tls_cert_pem?: string;
+  tls_key_pem?: string;
 }
 
 // S3ServeSettings mirrors service.S3ServeSettings. Shares appear as
 // buckets; a user's username/password act as access/secret key.
 export interface S3ServeSettings {
-  enabled: boolean;
   port?: number;
   host?: string;
+  hostname?: string;
   region?: string;
   tls_cert_pem?: string;
   tls_key_pem?: string;
+}
+
+// ServeServerEntry mirrors service.ServeServerEntry — one configured
+// server instance. `shares` names the global shares this instance
+// exposes (empty = all). Only the settings object matching `protocol`
+// is relevant.
+export interface ServeServerEntry {
+  id: string;
+  name?: string;
+  protocol: ServeProtocol;
+  enabled: boolean;
+  shares?: string[];
+  ftp?: FTPServeSettings;
+  sftp?: SFTPServeSettings;
+  tftp?: TFTPServeSettings;
+  webdav?: WebDAVServeSettings;
+  s3?: S3ServeSettings;
 }
 
 // ServeUser mirrors service.FTPUserEntry.
@@ -1020,21 +1040,22 @@ export interface ServeShare {
 // ServeSettings mirrors service.ServeSettings — the PUT body and the
 // document returned by GET /api/v1/serve.
 export interface ServeSettings {
-  ftp: FTPServeSettings;
-  sftp: SFTPServeSettings;
-  tftp: TFTPServeSettings;
-  webdav: WebDAVServeSettings;
-  s3: S3ServeSettings;
+  servers?: ServeServerEntry[];
   users?: ServeUser[];
   shares?: ServeShare[];
 }
 
-// ServeStatus mirrors serve.Status — one row per protocol from
+// ServeStatus mirrors serve.Status — one row per server instance from
 // GET /api/v1/serve/status.
 export interface ServeStatus {
+  id: string;
+  name?: string;
   protocol: string;
   enabled: boolean;
   running: boolean;
   address?: string;
+  hostname?: string;
+  tls?: boolean;
+  shared_port?: boolean;
   error?: string;
 }

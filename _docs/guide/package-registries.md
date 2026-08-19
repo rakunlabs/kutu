@@ -31,6 +31,40 @@ All registry types use the same admin model: **namespace → repository → kind
 
 Use the **Registries** page in the UI for day-to-day management. Use **Settings → Features → Artifact registry** to hide or re-enable the whole registry surface without deleting saved repositories or stored artifacts.
 
+## Dedicated listeners and virtual hosts
+
+The main server exposes repositories below `/registries/{namespace}/{repo}/...`. When a client needs the protocol at the host root, or a repository needs its own port, open **Registries → Listeners** and publish that repository through a dedicated listener.
+
+This is especially useful for Docker and OCI clients, which always request `/v2/...` at the endpoint root:
+
+```sh
+docker login docker.example.com
+docker pull docker.example.com/team/image:latest
+```
+
+Each listener selects one namespace and repository and accepts these network settings:
+
+| Setting | Meaning |
+| ------- | ------- |
+| `host` | Bind address. Empty binds all interfaces. |
+| `port` | TCP listen port. |
+| `hostname` | Optional HTTP virtual host. Different hostnames can share the same port. Empty is the catch-all for that port. A leading `*.` wildcard is supported. |
+| `tls_cert_pem` / `tls_key_pem` | Optional direct TLS keypair. Both fields are required when TLS is enabled. |
+
+TLS is not required. When Caddy, nginx, HAProxy, Traefik, or a cloud load balancer terminates HTTPS, configure the Kutu listener as plain HTTP and proxy to its bind address. Hostname routing still works from the forwarded HTTP `Host` header.
+
+Several HTTP-based services can share one port: registry listeners, S3 servers, and WebDAV servers all use the same virtual-host layer. Give every endpoint on that port a distinct hostname. A TLS port requires a certificate for every hostname on that port; plain and TLS endpoints cannot be mixed on one port.
+
+The equivalent management API is:
+
+```txt
+GET /api/v1/registries/listeners
+PUT /api/v1/registries/listeners
+GET /api/v1/registries/listeners/status
+```
+
+Listener changes reconcile live and do not require a Kutu restart.
+
 ## NPM topology example
 
 Registry kinds are protocol-neutral, but NPM is the clearest place to see how they work together. A common topology is:
