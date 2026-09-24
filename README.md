@@ -5,7 +5,6 @@
 [![License](https://img.shields.io/github/license/rakunlabs/kutu?color=blue&style=flat-square)](https://raw.githubusercontent.com/rakunlabs/kutu/main/LICENSE)
 [![Coverage](https://img.shields.io/sonar/coverage/rakunlabs_kutu?logo=sonarcloud&server=https%3A%2F%2Fsonarcloud.io&style=flat-square)](https://sonarcloud.io/summary/overall?id=rakunlabs_kutu)
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/rakunlabs/kutu/test.yml?branch=main&logo=github&style=flat-square&label=ci)](https://github.com/rakunlabs/kutu/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/rakunlabs/kutu?style=flat-square)](https://goreportcard.com/report/github.com/rakunlabs/kutu)
 
 A self-hosted artifact registry, file browser and gateway with a single embedded web UI.
 Runs as one binary backed by PostgreSQL, with no authentication layer in front of it.
