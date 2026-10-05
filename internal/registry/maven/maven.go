@@ -1,9 +1,53 @@
+// Package maven implements Maven 2 repository layout registries
+// (local, remote pull-through and virtual).
+//
+// Wire endpoints (paths relative to /registries/{ns}/{repo}):
+//
+//	GET|HEAD /{group/path}/{artifact}/{version}/{file}          artifact download
+//	GET|HEAD /{group/path}/{artifact}/maven-metadata.xml        artifact metadata (generated)
+//	GET|HEAD /{group/path}/{artifact}/{v}-SNAPSHOT/maven-metadata.xml
+//	                                                            snapshot metadata (generated)
+//	GET|HEAD /...{file}.{md5,sha1,sha256,sha512}                checksums (computed when missing)
+//	PUT      /{path}                                            deploy (local only)
+//	DELETE   /{path}                                            delete one file (local only)
+//
+// Local repositories store every uploaded file verbatim and generate
+// .md5/.sha1/.sha256/.sha512 sidecars. Client-uploaded checksums are
+// verified against the stored file (mismatch → 400). The artifact-level
+// maven-metadata.xml is regenerated from the stored versions on every
+// publish/delete; a client-uploaded copy is merged with it so versions
+// are never dropped. Unique SNAPSHOT deployments
+// (1.0-SNAPSHOT/app-1.0-20240101.120000-3.jar) maintain the
+// version-level maven-metadata.xml; requests for app-1.0-SNAPSHOT.jar
+// resolve to the newest timestamped build. Only the newest
+// SnapshotBuildsToKeep (10) builds of each SNAPSHOT version are kept.
+//
+// Remote repositories pull through and cache upstream files; checksums
+// the upstream lacks are computed from the cached file. Extra
+// prefix-routed upstreams match on the repository path (e.g. prefix
+// "com/acme/" routes com.acme.* artifacts). The Gradle plugin portal
+// works as a plain remote with URL https://plugins.gradle.org/m2
+// (plugin marker artifacts are ordinary POMs).
+//
+// Virtual repositories serve the first member hit, except for
+// maven-metadata.xml (and its checksums) which is merged across members.
+//
+// Client configuration (Maven settings.xml / pom.xml):
+//
+//	<repository>
+//	  <id>kutu</id>
+//	  <url>https://kutu.example.com/registries/{ns}/{repo}</url>
+//	</repository>
+//	<server><id>kutu</id><username>any</username><password>kutu_TOKEN</password></server>
+//
+// Gradle:
+//
+//	repositories { maven { url = uri("https://kutu.example.com/registries/{ns}/{repo}")
+//	    credentials { username = "any"; password = "kutu_TOKEN" } } }
 package maven
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -13,12 +57,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rakunlabs/kutu/internal/hook"
 	"github.com/rakunlabs/kutu/internal/rawfs"
 	"github.com/rakunlabs/kutu/internal/registry"
-	"github.com/rakunlabs/kutu/internal/registry/events"
-	"github.com/rakunlabs/kutu/internal/registry/upstream"
-	"github.com/rakunlabs/kutu/internal/registry/virtualbase"
+	"github.com/rakunlabs/kutu/internal/registry/pkgbase"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
@@ -72,6 +113,34 @@ func (s *Store) Open(rel string) (rawfs.ReadSeekCloser, *rawfs.FileInfo, error) 
 	return rc, fi, nil
 }
 
+// Read returns the full contents of rel.
+func (s *Store) Read(rel string) ([]byte, error) {
+	rc, _, err := s.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+// Stat stats rel.
+func (s *Store) Stat(rel string) (*rawfs.FileInfo, error) {
+	fi, err := s.fs.Stat(s.join(rel))
+	if err != nil {
+		if isNotFound(err) {
+			return nil, registry.ErrPackageNotFound
+		}
+		return nil, err
+	}
+	return fi, nil
+}
+
+// Exists reports whether rel is a stored regular file.
+func (s *Store) Exists(rel string) bool {
+	fi, err := s.fs.Stat(s.join(rel))
+	return err == nil && !fi.IsDir
+}
+
 func (s *Store) Write(rel string, body []byte) error {
 	wfs, ok := s.fs.(rawfs.WritableRawFS)
 	if !ok {
@@ -88,19 +157,275 @@ func (s *Store) Delete(rel string) error {
 	return wfs.Delete(s.join(rel))
 }
 
+func (s *Store) readDir(rel string) []rawfs.DirEntry {
+	entries, err := s.fs.ReadDir(s.join(rel))
+	if err != nil {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	return entries
+}
+
+// WriteWithChecksums stores body at rel plus md5/sha1/sha256/sha512 sidecars.
+func (s *Store) WriteWithChecksums(rel string, body []byte) error {
+	if err := s.Write(rel, body); err != nil {
+		return err
+	}
+	return s.writeChecksums(rel, body)
+}
+
+func (s *Store) writeChecksums(rel string, body []byte) error {
+	for _, algo := range checksumAlgos {
+		if err := s.Write(rel+"."+algo, []byte(checksumHex(algo, body))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteWithChecksums removes rel and its checksum/signature sidecars.
+func (s *Store) deleteWithChecksums(rel string) {
+	_ = s.Delete(rel)
+	for _, algo := range checksumAlgos {
+		_ = s.Delete(rel + "." + algo)
+	}
+}
+
+// Checksum returns the algo checksum of rel, reading the stored
+// sidecar or computing (and persisting) it from the file.
+func (s *Store) Checksum(rel, algo string) ([]byte, error) {
+	if b, err := s.Read(rel + "." + algo); err == nil {
+		return b, nil
+	}
+	body, err := s.Read(rel)
+	if err != nil {
+		return nil, err
+	}
+	sum := []byte(checksumHex(algo, body))
+	_ = s.Write(rel+"."+algo, sum)
+	return sum, nil
+}
+
+// belongs reports whether name is a primary artifact file of
+// artifact:version (including unique snapshot builds).
+func belongs(artifact, version, name string) bool {
+	if !isPrimary(name) {
+		return false
+	}
+	if strings.HasPrefix(name, artifact+"-"+version) {
+		return true
+	}
+	_, ok := parseSnapshotFile(artifact, version, name)
+	return ok
+}
+
+// artifactVersions lists the versions under group/artifact that hold
+// at least one primary file.
+func (s *Store) artifactVersions(group, artifact string) []string {
+	dir := path.Join(groupPath(group), artifact)
+	var out []string
+	for _, e := range s.readDir(dir) {
+		if !e.IsDir {
+			continue
+		}
+		for _, f := range s.readDir(path.Join(dir, e.Name)) {
+			if !f.IsDir && belongs(artifact, e.Name, f.Name) {
+				out = append(out, e.Name)
+				break
+			}
+		}
+	}
+	pkgbase.SortVersions(out)
+	return out
+}
+
+func (s *Store) generateArtifactMetadata(group, artifact string) (*metadataDoc, bool) {
+	vs := s.artifactVersions(group, artifact)
+	if len(vs) == 0 {
+		return nil, false
+	}
+	return &metadataDoc{
+		GroupID:    group,
+		ArtifactID: artifact,
+		Versioning: &versioning{
+			Latest:      pkgbase.Latest(vs),
+			Release:     latestRelease(vs),
+			Versions:    &versionList{Version: vs},
+			LastUpdated: nowStamp(),
+		},
+	}, true
+}
+
+// snapshotBuilds parses the unique snapshot builds stored for a
+// SNAPSHOT version (primary files only).
+func (s *Store) snapshotBuilds(group, artifact, version string) []snapshotFile {
+	var out []snapshotFile
+	for _, f := range s.readDir(path.Join(groupPath(group), artifact, version)) {
+		if f.IsDir || !isPrimary(f.Name) {
+			continue
+		}
+		if sf, ok := parseSnapshotFile(artifact, version, f.Name); ok {
+			out = append(out, sf)
+		}
+	}
+	return out
+}
+
+func newerBuild(a, b snapshotFile) bool {
+	if a.Build != b.Build {
+		return a.Build > b.Build
+	}
+	return a.Timestamp > b.Timestamp
+}
+
+func (s *Store) generateSnapshotMetadata(group, artifact, version string) (*metadataDoc, bool) {
+	builds := s.snapshotBuilds(group, artifact, version)
+	if len(builds) == 0 {
+		return nil, false
+	}
+	latest := builds[0]
+	perKey := map[string]snapshotFile{}
+	for _, b := range builds {
+		if newerBuild(b, latest) {
+			latest = b
+		}
+		key := b.Classifier + "\x00" + b.Ext
+		if cur, ok := perKey[key]; !ok || newerBuild(b, cur) {
+			perKey[key] = b
+		}
+	}
+	keys := make([]string, 0, len(perKey))
+	for k := range perKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	list := &snapshotVersionList{}
+	for _, k := range keys {
+		b := perKey[k]
+		list.Items = append(list.Items, snapshotVersion{Classifier: b.Classifier, Extension: b.Ext, Value: b.Value, Updated: compactTimestamp(b.Timestamp)})
+	}
+	return &metadataDoc{
+		GroupID:    group,
+		ArtifactID: artifact,
+		Version:    version,
+		Versioning: &versioning{
+			Snapshot:         &snapshotInfo{Timestamp: latest.Timestamp, BuildNumber: latest.Build},
+			LastUpdated:      nowStamp(),
+			SnapshotVersions: list,
+		},
+	}, true
+}
+
+// RegenerateMetadata rewrites group/artifact/maven-metadata.xml (and
+// checksums) from the stored versions, removing it when none remain.
+func (s *Store) RegenerateMetadata(group, artifact string) error {
+	rel := path.Join(groupPath(group), artifact, metadataFile)
+	doc, ok := s.generateArtifactMetadata(group, artifact)
+	if !ok {
+		s.deleteWithChecksums(rel)
+		return nil
+	}
+	return s.WriteWithChecksums(rel, renderMetadata(doc))
+}
+
+// RegenerateSnapshotMetadata rewrites the version-level metadata of a
+// SNAPSHOT version from its stored unique builds.
+func (s *Store) RegenerateSnapshotMetadata(group, artifact, version string) error {
+	if !isSnapshot(version) {
+		return nil
+	}
+	rel := path.Join(groupPath(group), artifact, version, metadataFile)
+	doc, ok := s.generateSnapshotMetadata(group, artifact, version)
+	if !ok {
+		s.deleteWithChecksums(rel)
+		return nil
+	}
+	return s.WriteWithChecksums(rel, renderMetadata(doc))
+}
+
+// PruneSnapshots deletes every file of all but the newest keep unique
+// builds of a SNAPSHOT version and returns the number of builds removed.
+func (s *Store) PruneSnapshots(group, artifact, version string, keep int) int {
+	if keep <= 0 || !isSnapshot(version) {
+		return 0
+	}
+	nums := map[int]struct{}{}
+	for _, b := range s.snapshotBuilds(group, artifact, version) {
+		nums[b.Build] = struct{}{}
+	}
+	if len(nums) <= keep {
+		return 0
+	}
+	sorted := make([]int, 0, len(nums))
+	for n := range nums {
+		sorted = append(sorted, n)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(sorted)))
+	drop := map[int]struct{}{}
+	for _, n := range sorted[keep:] {
+		drop[n] = struct{}{}
+	}
+	dir := path.Join(groupPath(group), artifact, version)
+	for _, f := range s.readDir(dir) {
+		if f.IsDir {
+			continue
+		}
+		name, _ := splitChecksum(f.Name)
+		name = strings.TrimSuffix(name, ".asc")
+		if sf, ok := parseSnapshotFile(artifact, version, name); ok {
+			if _, gone := drop[sf.Build]; gone {
+				_ = s.Delete(path.Join(dir, f.Name))
+			}
+		}
+	}
+	return len(drop)
+}
+
+// resolveSnapshot maps a non-unique snapshot request to the newest
+// stored unique build with the same classifier and extension.
+func (s *Store) resolveSnapshot(a aliasRef) (string, bool) {
+	var best *snapshotFile
+	for _, b := range s.snapshotBuilds(a.Group, a.Artifact, a.Version) {
+		if b.Classifier != a.Classifier || b.Ext != a.Ext {
+			continue
+		}
+		if best == nil || newerBuild(b, *best) {
+			cp := b
+			best = &cp
+		}
+	}
+	if best == nil {
+		return "", false
+	}
+	return a.target(best.Value), true
+}
+
+// resolveFile returns rel when stored, else the unique snapshot build
+// it aliases.
+func (s *Store) resolveFile(rel string) (string, bool) {
+	rel = cleanRel(rel)
+	if s.Exists(rel) {
+		return rel, true
+	}
+	if a, ok := parseSnapshotAlias(rel); ok {
+		return s.resolveSnapshot(a)
+	}
+	return "", false
+}
+
 // DeleteVersion removes all files under one Maven GAV version
 // directory and invalidates adjacent maven-metadata files. Maven's
 // repository layout is path-defined, so this stays within the
 // group/artifact/version prefix instead of deleting arbitrary paths.
+// The returned count covers artifact files (checksums excluded).
 func (s *Store) DeleteVersion(groupID, artifactID, version string) (int, error) {
 	groupID = strings.TrimSpace(groupID)
 	artifactID = strings.TrimSpace(artifactID)
 	version = strings.TrimSpace(version)
-	if groupID == "" || artifactID == "" || version == "" {
+	if groupID == "" || artifactID == "" || version == "" || strings.ContainsAny(artifactID+version, "/\\") || version == ".." || version == "." {
 		return 0, registry.ErrInvalidPackageName
 	}
-	groupPath := strings.ReplaceAll(groupID, ".", "/")
-	versionPrefix := path.Join(groupPath, artifactID, version)
+	versionPrefix := path.Join(groupPath(groupID), artifactID, version)
 	files, err := s.ListFiles(versionPrefix)
 	if err != nil {
 		return 0, err
@@ -118,15 +443,15 @@ func (s *Store) DeleteVersion(groupID, artifactID, version string) (int, error) 
 			}
 			continue
 		}
-		deleted++
+		if isPrimary(path.Base(f.Path)) {
+			deleted++
+		}
 	}
 
-	artifactPrefix := path.Join(groupPath, artifactID)
-	if metadata, err := s.ListFiles(artifactPrefix); err == nil {
-		for _, f := range metadata {
-			if path.Dir(f.Path) == artifactPrefix && isMutablePath(f.Path) {
-				_ = s.Delete(f.Path)
-			}
+	artifactPrefix := path.Join(groupPath(groupID), artifactID)
+	for _, f := range s.readDir(artifactPrefix) {
+		if !f.IsDir && isMutablePath(f.Name) {
+			_ = s.Delete(path.Join(artifactPrefix, f.Name))
 		}
 	}
 	return deleted, firstErr
@@ -184,32 +509,23 @@ func (s *Store) ListArtifacts() ([]Artifact, error) {
 	versions := map[string]map[string]struct{}{}
 	meta := map[string]Artifact{}
 	for _, f := range files {
-		parts := strings.Split(cleanRel(f.Path), "/")
-		if len(parts) < 4 {
+		c, ok := parseArtifactPath(f.Path)
+		if !ok || !belongs(c.Artifact, c.Version, c.File) {
 			continue
 		}
-		artifact := parts[len(parts)-3]
-		version := parts[len(parts)-2]
-		filename := parts[len(parts)-1]
-		if !strings.HasPrefix(filename, artifact+"-"+version) && filename != "maven-metadata.xml" {
-			continue
-		}
-		group := strings.Join(parts[:len(parts)-3], ".")
-		key := group + ":" + artifact
+		key := c.Name()
 		if versions[key] == nil {
 			versions[key] = map[string]struct{}{}
-			meta[key] = Artifact{GroupID: group, ArtifactID: artifact}
+			meta[key] = Artifact{GroupID: c.Group, ArtifactID: c.Artifact}
 		}
-		if version != "" && version != "maven-metadata.xml" {
-			versions[key][version] = struct{}{}
-		}
+		versions[key][c.Version] = struct{}{}
 	}
 	out := make([]Artifact, 0, len(meta))
 	for key, a := range meta {
 		for v := range versions[key] {
 			a.Versions = append(a.Versions, v)
 		}
-		sort.Strings(a.Versions)
+		pkgbase.SortVersions(a.Versions)
 		out = append(out, a)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -269,220 +585,14 @@ func (s *Store) purge(match func(File) bool) (int, int64, []error) {
 	return count, bytes, errs
 }
 
-// Local is a hosted Maven repository. It supports the standard static
-// GET/HEAD layout plus PUT/DELETE for deployments.
-type Local struct {
-	namespace string
-	name      string
-	store     *Store
-	allowPush bool
-	maxUpload int64
-	emitter   events.Emitter
-}
-
-func NewLocalFactory() registry.Factory {
-	return func(_ context.Context, deps registry.Deps, ns string, r *service.RegistryRepository) (registry.Registry, error) {
-		fs, err := deps.MountRawFS(r.Mount)
-		if err != nil {
-			return nil, fmt.Errorf("maven/local %s/%s: %w", ns, r.Name, err)
-		}
-		return &Local{namespace: ns, name: r.Name, store: NewStore(fs, r.BasePath), allowPush: r.AllowPush, maxUpload: r.MaxUploadSize, emitter: deps.Emitter}, nil
-	}
-}
-
-func (l *Local) Namespace() string { return l.namespace }
-func (l *Local) Name() string      { return l.name }
-func (l *Local) Type() string      { return service.RegistryTypeMaven }
-func (l *Local) Kind() string      { return service.RegistryKindLocal }
-func (l *Local) Store() *Store     { return l.store }
-func (l *Local) Close() error      { return nil }
-
-func (l *Local) Stats(context.Context) (registry.Stats, error) {
-	artifacts, versions, files, bytes := l.store.Count()
-	return registry.Stats{PackageCount: artifacts, VersionCount: versions, BlobCount: files, TotalBytes: bytes}, nil
-}
-
-func (l *Local) PackageDetail(_ context.Context, name string) (*registry.PackageDetail, error) {
-	return packageDetail(l.store, name)
-}
-
-func (l *Local) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		serveFile(w, r, l.store, r.URL.Path)
-	case http.MethodPut:
-		l.put(w, r)
-	case http.MethodDelete:
-		if !l.allowPush {
-			http.Error(w, "delete disabled", http.StatusMethodNotAllowed)
-			return
-		}
-		if err := l.store.Delete(r.URL.Path); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (l *Local) put(w http.ResponseWriter, r *http.Request) {
-	if !l.allowPush {
-		http.Error(w, "push disabled", http.StatusMethodNotAllowed)
-		return
-	}
-	if !validRel(r.URL.Path) {
-		http.Error(w, "invalid maven path", http.StatusBadRequest)
-		return
-	}
-	max := l.maxUpload
-	if max == 0 {
-		max = 512 * 1024 * 1024
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, max+1))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if int64(len(body)) > max {
-		http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	if err := l.store.Write(r.URL.Path, body); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	events.EmitSafe(l.emitter, hook.Event{Type: hook.EventRegistryPublished, Mount: l.namespace, Path: l.name + "/" + cleanRel(r.URL.Path), Protocol: "registry-maven", Size: int64(len(body))})
-	w.WriteHeader(http.StatusCreated)
-}
-
-type Remote struct {
-	namespace  string
-	name       string
-	store      *Store
-	client     *upstream.Client
-	mutableTTL time.Duration
-}
-
-func NewRemoteFactory() registry.Factory {
-	return func(_ context.Context, deps registry.Deps, ns string, r *service.RegistryRepository) (registry.Registry, error) {
-		b, err := upstream.BuildRemote(deps, "maven/remote", ns, r, 5*time.Minute)
-		if err != nil {
-			return nil, err
-		}
-		return &Remote{namespace: ns, name: r.Name, store: NewStore(b.FS, b.BasePath), client: b.Client, mutableTTL: b.MutableTTL}, nil
-	}
-}
-
-func (rr *Remote) Namespace() string { return rr.namespace }
-func (rr *Remote) Name() string      { return rr.name }
-func (rr *Remote) Type() string      { return service.RegistryTypeMaven }
-func (rr *Remote) Kind() string      { return service.RegistryKindRemote }
-func (rr *Remote) Store() *Store     { return rr.store }
-func (rr *Remote) Close() error {
-	if rr.client != nil {
-		return rr.client.Close()
-	}
-	return nil
-}
-
-func (rr *Remote) Stats(ctx context.Context) (registry.Stats, error) {
-	return (&Local{store: rr.store}).Stats(ctx)
-}
-func (rr *Remote) PackageDetail(_ context.Context, name string) (*registry.PackageDetail, error) {
-	return packageDetail(rr.store, name)
-}
-func (rr *Remote) ProbeUpstream(ctx context.Context) (registry.UpstreamHealth, error) {
-	return upstream.Probe(ctx, rr.client, "/"), nil
-}
-func (rr *Remote) PurgeCache(_ context.Context, opts registry.PurgeOptions) (registry.PurgeStats, error) {
-	count, bytes, errs := rr.store.PurgeMutable()
-	if opts.All {
-		count, bytes, errs = rr.store.PurgeAll()
-	}
-	out := registry.PurgeStats{PurgedFiles: count, PurgedBytes: bytes}
-	for _, err := range errs {
-		out.Errors = append(out.Errors, err.Error())
-	}
-	return out, nil
-}
-
-func (rr *Remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "remote registry is read-only", http.StatusMethodNotAllowed)
-		return
-	}
-	rel := cleanRel(r.URL.Path)
-	if rel == "" {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	if rc, fi, err := rr.store.Open(rel); err == nil {
-		fresh := !isMutablePath(rel) || rr.mutableTTL <= 0 || time.Since(fi.ModTime) < rr.mutableTTL
-		if fresh {
-			defer rc.Close()
-			writeFileResponse(w, r, rel, rc, fi)
-			return
-		}
-		rc.Close()
-	}
-	resp, err := rr.client.Get(r.Context(), "/"+rel)
-	if err != nil {
-		if errors.Is(err, upstream.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "read upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	_ = rr.store.Write(rel, body)
-	if resp.ContentType != "" {
-		w.Header().Set("Content-Type", resp.ContentType)
-	} else {
-		setContentType(w, rel)
-	}
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(body)
-	}
-}
-
-type Virtual struct{ *virtualbase.Base }
-
-func NewVirtualFactory(resolver virtualbase.Resolver) registry.Factory {
-	return func(_ context.Context, _ registry.Deps, ns string, r *service.RegistryRepository) (registry.Registry, error) {
-		if len(r.Members) == 0 {
-			return nil, fmt.Errorf("maven/virtual %s/%s: members required", ns, r.Name)
-		}
-		return &Virtual{Base: virtualbase.New(ns, r.Name, r.Members, resolver)}, nil
-	}
-}
-
-func (v *Virtual) Type() string { return service.RegistryTypeMaven }
-func (v *Virtual) PackageDetail(ctx context.Context, name string) (*registry.PackageDetail, error) {
-	return v.DelegatePackageDetail(ctx, name)
-}
-func (v *Virtual) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !v.ServeFirstHit(w, r) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}
-}
-
-func serveFile(w http.ResponseWriter, r *http.Request, s *Store, rel string) {
+func serveFile(w http.ResponseWriter, r *http.Request, s *Store, rel string) bool {
 	rc, fi, err := s.Open(rel)
 	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
+		return false
 	}
 	defer rc.Close()
 	writeFileResponse(w, r, rel, rc, fi)
+	return true
 }
 
 func writeFileResponse(w http.ResponseWriter, r *http.Request, rel string, rc io.Reader, fi *rawfs.FileInfo) {
@@ -496,6 +606,19 @@ func writeFileResponse(w http.ResponseWriter, r *http.Request, rel string, rc io
 	}
 }
 
+func writeBody(w http.ResponseWriter, r *http.Request, rel string, body []byte) {
+	if _, algo := splitChecksum(rel); algo != "" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	} else {
+		setContentType(w, rel)
+	}
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
+}
+
 func setContentType(w http.ResponseWriter, rel string) {
 	if ct := mime.TypeByExtension(path.Ext(rel)); ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -504,9 +627,16 @@ func setContentType(w http.ResponseWriter, rel string) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 }
 
+// isMutablePath reports whether a cached path can change upstream:
+// metadata documents and non-unique SNAPSHOT aliases (plus checksums).
 func isMutablePath(p string) bool {
 	base := path.Base(p)
-	return base == "maven-metadata.xml" || strings.HasPrefix(base, "maven-metadata.xml.")
+	if base == metadataFile || strings.HasPrefix(base, metadataFile+".") {
+		return true
+	}
+	b, _ := splitChecksum(p)
+	_, ok := parseSnapshotAlias(b)
+	return ok
 }
 
 func packageDetail(s *Store, name string) (*registry.PackageDetail, error) {
@@ -541,7 +671,7 @@ func packageDetail(s *Store, name string) (*registry.PackageDetail, error) {
 func splitName(name string) (string, string) {
 	if strings.Contains(name, ":") {
 		parts := strings.SplitN(name, ":", 2)
-		return parts[0], parts[1]
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
 	parts := strings.Split(cleanRel(name), "/")
 	if len(parts) < 2 {
@@ -550,8 +680,15 @@ func splitName(name string) (string, string) {
 	return strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
 }
 
+func versionFile(group, artifact, version, ext string) string {
+	return path.Join(groupPath(group), artifact, version, artifact+"-"+version+ext)
+}
+
 func fileSize(s *Store, group, artifact, version, ext string) int64 {
-	rel := strings.ReplaceAll(group, ".", "/") + "/" + artifact + "/" + version + "/" + artifact + "-" + version + ext
+	rel, ok := s.resolveFile(versionFile(group, artifact, version, ext))
+	if !ok {
+		return 0
+	}
 	fi, err := s.fs.Stat(s.join(rel))
 	if err != nil {
 		return 0

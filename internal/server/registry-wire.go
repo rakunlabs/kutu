@@ -6,6 +6,7 @@ import (
 	"github.com/rakunlabs/kutu/internal/registry"
 	"github.com/rakunlabs/kutu/internal/registry/cargo"
 	"github.com/rakunlabs/kutu/internal/registry/docker"
+	"github.com/rakunlabs/kutu/internal/registry/generic"
 	"github.com/rakunlabs/kutu/internal/registry/goproxy"
 	"github.com/rakunlabs/kutu/internal/registry/helm"
 	"github.com/rakunlabs/kutu/internal/registry/maven"
@@ -79,7 +80,18 @@ var protocolFactories = []protocolFactory{
 		Remote:  cargo.NewRemoteFactory(),
 		Virtual: func(m *registry.Manager) registry.Factory { return cargo.NewVirtualFactory(m) },
 	},
+	{
+		Type:    service.RegistryTypeGeneric,
+		Local:   generic.NewLocalFactory(),
+		Remote:  generic.NewRemoteFactory(),
+		Virtual: func(m *registry.Manager) registry.Factory { return generic.NewVirtualFactory(m) },
+	},
 }
+
+// registerProtocol appends a protocol from a per-protocol wire file
+// (registry-wire-{protocol}.go) at init time, keeping this file free
+// of merge contention as protocols are added.
+func registerProtocol(pf protocolFactory) { protocolFactories = append(protocolFactories, pf) }
 
 // registerRegistryFactories is the single boot-time hookup for
 // every protocol head supported by the artifact registry feature.

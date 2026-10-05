@@ -48,6 +48,7 @@ package registry
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/rakunlabs/kutu/internal/rawfs"
 	"github.com/rakunlabs/kutu/internal/registry/blobstore"
@@ -283,6 +284,144 @@ type PackageDetail struct {
 	Maven  *MavenArtifactDetail `json:"maven,omitempty"`
 	PyPI   *PyPIPackageDetail   `json:"pypi,omitempty"`
 	Cargo  *CargoCrateDetail    `json:"cargo,omitempty"`
+	// Generic is the protocol-neutral detail shape used by every
+	// registry type added after the original seven (nuget, rubygems,
+	// apt, …). The UI renders it uniformly.
+	Generic *GenericPackageDetail `json:"generic,omitempty"`
+}
+
+// GenericPackageDetail is the shared detail payload for protocols
+// that don't warrant a bespoke struct. Metadata carries free-form
+// protocol-specific key/values (e.g. "authors", "architecture").
+type GenericPackageDetail struct {
+	LatestVersion string                 `json:"latest_version,omitempty"`
+	Description   string                 `json:"description,omitempty"`
+	Homepage      string                 `json:"homepage,omitempty"`
+	License       string                 `json:"license,omitempty"`
+	Metadata      map[string]string      `json:"metadata,omitempty"`
+	Versions      []GenericVersionDetail `json:"versions,omitempty"`
+}
+
+// GenericVersionDetail is one row in GenericPackageDetail.Versions.
+type GenericVersionDetail struct {
+	Version     string            `json:"version"`
+	PublishedAt string            `json:"published_at,omitempty"` // RFC3339
+	Size        int64             `json:"size,omitempty"`
+	Yanked      bool              `json:"yanked,omitempty"`
+	Files       []GenericFile     `json:"files,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+}
+
+// GenericFile is one stored file belonging to a version.
+type GenericFile struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+// PackageSummary is one row of a registry's package listing.
+type PackageSummary struct {
+	Name     string   `json:"name"`
+	Versions []string `json:"versions,omitempty"`
+}
+
+// PackageLister is the optional, protocol-neutral listing interface.
+// Every registry type added after the original seven implements it
+// (Local and Remote); the admin API exposes it generically at
+// GET /api/v1/registries/{type}/{ns}/{repo}/entries.
+type PackageLister interface {
+	ListPackages(ctx context.Context) ([]PackageSummary, error)
+}
+
+// VersionDeleter is the optional, protocol-neutral delete interface
+// used by the admin API's DELETE .../packages/{name}?version=V for
+// registry types that don't have a bespoke delete branch. Must return
+// ErrPackageNotFound when the version does not exist.
+type VersionDeleter interface {
+	DeleteVersion(ctx context.Context, name, version string) error
+}
+
+// ArtifactRef identifies the package/version an incoming data-plane
+// request is fetching. Used by the policy layer to gate downloads.
+type ArtifactRef struct {
+	Name    string
+	Version string
+}
+
+// ArtifactClassifier is implemented by registries that can map an
+// incoming request to the package (and, for artifact downloads, the
+// version) it targets. ok=false means "not a package-scoped request"
+// (index roots, config documents, …). Version is empty for metadata
+// requests that are scoped to a package but not to a version.
+type ArtifactClassifier interface {
+	ClassifyRequest(r *http.Request) (ref ArtifactRef, ok bool)
+}
+
+// ArtifactMeta is the policy-relevant metadata of one version.
+// Zero values mean "unknown".
+type ArtifactMeta struct {
+	License     string    // SPDX id or expression
+	PublishedAt time.Time // upstream publish time / local push time
+}
+
+// ArtifactInfoProvider is implemented by registries that can report
+// license / publish time for a version (used by license and
+// quarantine policies). Return ErrPackageNotFound when unknown.
+type ArtifactInfoProvider interface {
+	ArtifactInfo(ctx context.Context, ref ArtifactRef) (ArtifactMeta, error)
+}
+
+// VersionPromoter copies one version from this (local) registry into
+// dst, which is guaranteed to be a local registry of the same type.
+// Implementations must update dst's index metadata so the version is
+// immediately installable from dst.
+type VersionPromoter interface {
+	PromoteVersion(ctx context.Context, dst Registry, name, version string) error
+}
+
+// Prefetcher is implemented by remote registries that can warm their
+// cache for a package. version == "" means "metadata + latest".
+type Prefetcher interface {
+	Prefetch(ctx context.Context, name, version string) error
+}
+
+// SignatureChecker is implemented by Docker registries: reports
+// whether a manifest reference (tag or digest) has at least one
+// signature referrer (cosign / notation).
+type SignatureChecker interface {
+	HasSignature(ctx context.Context, name, reference string) (bool, error)
+}
+
+// Ecosystem is the OSV.dev ecosystem name for a registry type, or ""
+// when OSV has no matching ecosystem.
+func Ecosystem(registryType string) string {
+	switch registryType {
+	case "go":
+		return "Go"
+	case "npm":
+		return "npm"
+	case "maven":
+		return "Maven"
+	case "pypi":
+		return "PyPI"
+	case "cargo":
+		return "crates.io"
+	case "nuget":
+		return "NuGet"
+	case "rubygems":
+		return "RubyGems"
+	case "composer":
+		return "Packagist"
+	case "pub":
+		return "Pub"
+	case "swift":
+		return "SwiftURL"
+	case "cran":
+		return "CRAN"
+	case "conan":
+		return "ConanCenter"
+	}
+	return ""
 }
 
 // NPMPackageDetail carries the rich metadata surfaced for one NPM

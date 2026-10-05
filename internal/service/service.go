@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/rakunlabs/query"
 
@@ -15,25 +18,67 @@ const (
 	metaRegistryDisabled = "registry_disabled"
 	metaEventLogDisabled = "event_log_disabled"
 	metaEncVerifier      = "encryption_verifier"
+	metaAuthSettings     = "auth_settings"
 )
 
 // Service is the transport-agnostic application core for kutu. It owns
 // the relational config store and exposes per-entity CRUD plus the few
 // aggregate views the registry/proxy managers need.
 //
-// Authentication is intentionally absent: kutu runs as a plain,
-// unauthenticated server. ValidateToken always succeeds.
+// Users, permissions, sessions and API tokens live here too; the HTTP
+// auth wiring is in internal/server/authx.
 type Service struct {
 	store Storage
 
 	// keyManager owns the at-rest encryption key lifecycle. nil-safe:
 	// the keyops methods return an error when it isn't wired.
 	keyManager *keymgr.Manager
+
+	// tokenUsage batches API token last-used timestamps.
+	tokenUsage *tokenUsage
+	// bgWorker owns Service-level background loops.
+	bgWorker *worker
+
+	// coordMu guards the swappable coordinators below, which are
+	// replaced on auth reload while requests run.
+	coordMu sync.RWMutex
+	// passkeys is the WebAuthn coordinator; nil when passkeys are off.
+	passkeys *PasskeyService
+	// totp is the TOTP coordinator; nil until the auth manager boots.
+	totp *TOTPService
 }
 
 // New constructs a Service backed by the given storage.
 func New(store Storage) *Service {
-	return &Service{store: store}
+	s := &Service{
+		store:      store,
+		tokenUsage: newTokenUsage(),
+		bgWorker:   newWorker(),
+	}
+	if store != nil {
+		s.startTokenUsageFlusher()
+		s.startSessionSweeper()
+	}
+	return s
+}
+
+// Close stops background workers and flushes pending token usage.
+func (s *Service) Close() {
+	s.bgWorker.stop()
+	s.SetPasskeyService(nil)
+	s.SetTOTPService(nil)
+}
+
+// startSessionSweeper periodically deletes expired sessions and passkey
+// challenges.
+func (s *Service) startSessionSweeper() {
+	s.bgWorker.every(10*time.Minute, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.store.Sessions().DeleteExpired(ctx); err != nil {
+			slog.Warn("session sweep failed", "error", err)
+		}
+	})
 }
 
 // ── feature flags (meta) ──
@@ -230,13 +275,6 @@ func (s *Service) Hooks(ctx context.Context) ([]hook.Hook, error) {
 // ReplaceHooks swaps the entire hook set.
 func (s *Service) ReplaceHooks(ctx context.Context, hooks []hook.Hook) error {
 	return s.store.ReplaceHooks(ctx, hooks)
-}
-
-// ── auth (no-op) ──
-
-// ValidateToken always returns nil — kutu has no token auth.
-func (s *Service) ValidateToken(ctx context.Context, raw, scope, op string) error {
-	return nil
 }
 
 // ── config data / files (not supported) ──

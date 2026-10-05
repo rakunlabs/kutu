@@ -42,10 +42,10 @@ func TestValidatePackageName(t *testing.T) {
 
 func TestParseNameFromPath(t *testing.T) {
 	cases := []struct {
-		in        string
-		wantName  string
-		wantRest  string
-		wantOK    bool
+		in       string
+		wantName string
+		wantRest string
+		wantOK   bool
 	}{
 		{"/lodash", "lodash", "", true},
 		{"/lodash/-/lodash-1.0.0.tgz", "lodash", "/-/lodash-1.0.0.tgz", true},
@@ -55,8 +55,8 @@ func TestParseNameFromPath(t *testing.T) {
 		{"/@types%2Fnode/-/node-20.0.0.tgz", "@types/node", "/-/node-20.0.0.tgz", true},
 		{"", "", "", false},
 		{"/", "", "", false},
-		{"/@scope", "", "", false},   // missing name
-		{"/@scope/", "", "", false},  // empty name
+		{"/@scope", "", "", false},  // missing name
+		{"/@scope/", "", "", false}, // empty name
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

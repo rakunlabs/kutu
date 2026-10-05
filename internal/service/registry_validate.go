@@ -131,6 +131,35 @@ func validateNamespaceRepos(ns *RegistryNamespace) error {
 		if err := validateRegistryPolicy(r); err != nil {
 			return err
 		}
+		if r.Prefetch != nil {
+			if r.Kind != RegistryKindRemote {
+				return fmt.Errorf("repo %q: prefetch is supported only for remote repositories: %w", r.Name, ErrBadRequest)
+			}
+			if r.Prefetch.Interval != "" {
+				if d, err := time.ParseDuration(r.Prefetch.Interval); err != nil || d < time.Minute {
+					return fmt.Errorf("repo %q: prefetch.interval must be a duration >= 1m: %w", r.Name, ErrBadRequest)
+				}
+			}
+		}
+		if r.Replication != nil {
+			if r.Kind != RegistryKindLocal {
+				return fmt.Errorf("repo %q: replication is supported only for local repositories: %w", r.Name, ErrBadRequest)
+			}
+			u, err := url.Parse(r.Replication.SourceURL)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return fmt.Errorf("repo %q: replication.source_url must be http(s): %w", r.Name, ErrBadRequest)
+			}
+			if r.Replication.Interval != "" {
+				if d, err := time.ParseDuration(r.Replication.Interval); err != nil || d < time.Minute {
+					return fmt.Errorf("repo %q: replication.interval must be a duration >= 1m: %w", r.Name, ErrBadRequest)
+				}
+			}
+		}
+		if r.SigningKey != "" || r.SigningKeyName != "" {
+			if !registryTypeIn(r.Type, RegistryTypesWithSigning) || r.Kind != RegistryKindLocal {
+				return fmt.Errorf("repo %q: signing_key is supported only for local %v repositories: %w", r.Name, RegistryTypesWithSigning, ErrBadRequest)
+			}
+		}
 	}
 
 	// Second pass: virtual member references resolve to existing repos
@@ -273,8 +302,19 @@ func validateRegistryPolicy(r *RegistryRepository) error {
 		}
 	}
 	if r.Policy.Retention != nil {
-		if r.Type != RegistryTypeDocker || r.Kind != RegistryKindLocal {
-			return fmt.Errorf("repo %q: retention policy is supported only for docker local repositories: %w", r.Name, ErrBadRequest)
+		if r.Kind != RegistryKindLocal {
+			return fmt.Errorf("repo %q: retention policy is supported only for local repositories: %w", r.Name, ErrBadRequest)
+		}
+		if r.Type != RegistryTypeDocker && (r.Policy.Retention.GCMinAgeSeconds != 0 || r.Policy.Retention.AbandonedUploadMaxAgeSeconds != 0) {
+			return fmt.Errorf("repo %q: retention GC settings are supported only for docker repositories: %w", r.Name, ErrBadRequest)
+		}
+		if r.Policy.Retention.KeepLastVersions < 0 || r.Policy.Retention.MaxVersionAgeDays < 0 {
+			return fmt.Errorf("repo %q: retention keep_last_versions / max_version_age_days must be >= 0: %w", r.Name, ErrBadRequest)
+		}
+		for _, pat := range r.Policy.Retention.KeepPatterns {
+			if _, err := path.Match(pat, "candidate"); err != nil || strings.TrimSpace(pat) == "" {
+				return fmt.Errorf("repo %q: retention keep pattern %q is invalid: %w", r.Name, pat, ErrBadRequest)
+			}
 		}
 		if r.Policy.Retention.GCMinAgeSeconds < 0 {
 			return fmt.Errorf("repo %q: retention.gc_min_age_seconds must be >= 0: %w", r.Name, ErrBadRequest)
@@ -282,6 +322,33 @@ func validateRegistryPolicy(r *RegistryRepository) error {
 		if r.Policy.Retention.AbandonedUploadMaxAgeSeconds < 0 {
 			return fmt.Errorf("repo %q: retention.abandoned_upload_max_age_seconds must be >= 0: %w", r.Name, ErrBadRequest)
 		}
+	}
+	for _, list := range [][]string{r.Policy.Include, r.Policy.Exclude} {
+		for _, pat := range list {
+			if strings.TrimSpace(pat) == "" {
+				return fmt.Errorf("repo %q: include/exclude contains an empty pattern: %w", r.Name, ErrBadRequest)
+			}
+			if _, err := path.Match(strings.TrimSuffix(pat, "**")+"x", "candidate"); err != nil {
+				return fmt.Errorf("repo %q: include/exclude pattern %q is invalid: %w", r.Name, pat, ErrBadRequest)
+			}
+		}
+	}
+	if r.Policy.QuotaBytes < 0 {
+		return fmt.Errorf("repo %q: quota_bytes must be >= 0: %w", r.Name, ErrBadRequest)
+	}
+	if r.Policy.QuarantineDays < 0 {
+		return fmt.Errorf("repo %q: quarantine_days must be >= 0: %w", r.Name, ErrBadRequest)
+	}
+	switch strings.ToLower(r.Policy.MinSeverity) {
+	case "", "low", "moderate", "medium", "high", "critical":
+	default:
+		return fmt.Errorf("repo %q: min_severity %q (want low|moderate|high|critical): %w", r.Name, r.Policy.MinSeverity, ErrBadRequest)
+	}
+	if r.Policy.RequireSignature && r.Type != RegistryTypeDocker {
+		return fmt.Errorf("repo %q: require_signature is supported only for docker repositories: %w", r.Name, ErrBadRequest)
+	}
+	if (r.Policy.ImmutableVersions || r.Policy.QuotaBytes > 0) && r.Kind != RegistryKindLocal {
+		return fmt.Errorf("repo %q: immutable_versions / quota_bytes apply only to local repositories: %w", r.Name, ErrBadRequest)
 	}
 	return nil
 }
@@ -294,8 +361,8 @@ func validateRegistryUpstreams(r *RegistryRepository) error {
 	if len(r.Upstreams) == 0 {
 		return nil
 	}
-	if r.Type != RegistryTypeGo {
-		return fmt.Errorf("repo %q: prefix-routed upstreams are only supported for go repositories: %w", r.Name, ErrBadRequest)
+	if !registryTypeIn(r.Type, RegistryTypesWithPrefixUpstreams) {
+		return fmt.Errorf("repo %q: prefix-routed upstreams are only supported for %v repositories: %w", r.Name, RegistryTypesWithPrefixUpstreams, ErrBadRequest)
 	}
 	seen := make(map[string]struct{}, len(r.Upstreams))
 	for i := range r.Upstreams {

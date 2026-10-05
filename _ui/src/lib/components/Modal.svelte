@@ -93,14 +93,14 @@
     tabindex="-1"
   >
     <div
-      class="relative bg-white dark:bg-warm-900 rounded shadow-xl border border-warm-200 dark:border-warm-800 w-full {sizeClass[
+      class="relative bg-white dark:bg-warm-900 rounded shadow-xl border border-slate-200 dark:border-warm-700 w-full {sizeClass[
         size
       ]} max-h-[90vh] flex flex-col"
       role="document"
     >
       {#if header}
         <header
-          class="flex items-center justify-between px-4 py-3 border-b border-warm-200 dark:border-warm-800 shrink-0"
+          class="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-warm-700 shrink-0"
         >
           {@render header()}
         </header>
@@ -112,7 +112,7 @@
 
       {#if footer}
         <footer
-          class="flex items-center justify-end gap-2 px-4 py-3 border-t border-warm-200 dark:border-warm-800 shrink-0"
+          class="flex items-center justify-end gap-2 px-4 py-3 border-t border-slate-200 dark:border-warm-700 shrink-0"
         >
           {@render footer()}
         </footer>

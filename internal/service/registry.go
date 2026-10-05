@@ -154,6 +154,42 @@ type RegistryRepository struct {
 	CORSOrigins   []string        `json:"cors_origins,omitempty"`
 	MaxUploadSize int64           `json:"max_upload_size,omitempty"` // bytes; 0 = type default
 	Policy        *RegistryPolicy `json:"policy,omitempty"`
+
+	// SigningKey is an ASCII-armored OpenPGP private key (apt, rpm) or
+	// a PEM RSA private key (alpine) used to sign generated repository
+	// metadata. Sealed at rest like upstream credentials; never
+	// returned to non-admin callers. Empty = unsigned metadata.
+	SigningKey string `json:"signing_key,omitempty"`
+	// SigningKeyName is the public key file name advertised to
+	// clients (alpine: "{name}.rsa.pub"). Optional.
+	SigningKeyName string `json:"signing_key_name,omitempty"`
+
+	// Prefetch (remote kind) keeps the listed packages warm in the
+	// cache: every Interval the server refreshes metadata and the
+	// latest version (or the pinned "name@version").
+	Prefetch *RegistryPrefetch `json:"prefetch,omitempty"`
+
+	// Replication (local kind) pulls this repository's content from
+	// another kutu instance's export endpoint on a schedule (mirror /
+	// DR / air-gap staging).
+	Replication *RegistryReplication `json:"replication,omitempty"`
+}
+
+// RegistryPrefetch configures scheduled cache warming.
+type RegistryPrefetch struct {
+	Packages []string `json:"packages,omitempty"` // "name" or "name@version"
+	Interval string   `json:"interval,omitempty"` // Go duration; default 6h
+}
+
+// RegistryReplication configures a pull replica of another kutu repo.
+type RegistryReplication struct {
+	// SourceURL is the full export URL of the source repository, e.g.
+	// https://kutu.example.com/api/v1/registries/npm/default/npm-local/export
+	SourceURL string `json:"source_url"`
+	// Token is a kutu API token for the source (sealed at rest).
+	Token    string `json:"token,omitempty"`
+	Interval string `json:"interval,omitempty"` // Go duration; default 1h
+	Disabled bool   `json:"disabled,omitempty"`
 }
 
 // RegistryPolicy carries optional per-repository operational policy.
@@ -167,6 +203,46 @@ type RegistryPolicy struct {
 	// shell-style matching (`v*`, `prod`, `release-*`) against one tag.
 	ImmutableTags []string                 `json:"immutable_tags,omitempty"`
 	Retention     *RegistryRetentionPolicy `json:"retention,omitempty"`
+
+	// Include / Exclude are shell-style package-name patterns
+	// (path.Match, plus "**" suffix for "any depth"). When Include is
+	// non-empty only matching packages are served; Exclude always
+	// wins. Applies to every kind; most useful on remote/virtual repos
+	// to block dependency-confusion attacks.
+	Include []string `json:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
+
+	// ImmutableVersions rejects re-publishing an existing version on
+	// local repos (all types).
+	ImmutableVersions bool `json:"immutable_versions,omitempty"`
+
+	// QuotaBytes caps the stored size of a local repo; pushes that
+	// would exceed it are rejected with 413. 0 = unlimited.
+	QuotaBytes int64 `json:"quota_bytes,omitempty"`
+
+	// QuarantineDays hides versions first seen (remote) or published
+	// (local) less than N days ago. 0 = disabled.
+	QuarantineDays int `json:"quarantine_days,omitempty"`
+
+	// Vulnerability policy backed by OSV.dev.
+	//   BlockVulnerable — refuse downloads of versions with a known
+	//                     OSV advisory.
+	//   MinSeverity     — optional floor ("low"|"moderate"|"high"|
+	//                     "critical"); advisories below are ignored.
+	BlockVulnerable bool   `json:"block_vulnerable,omitempty"`
+	MinSeverity     string `json:"min_severity,omitempty"`
+
+	// License policy. AllowedLicenses (SPDX ids, case-insensitive)
+	// when non-empty is an allowlist; DeniedLicenses always blocks.
+	// Packages without license metadata pass unless
+	// BlockUnknownLicense is set.
+	AllowedLicenses     []string `json:"allowed_licenses,omitempty"`
+	DeniedLicenses      []string `json:"denied_licenses,omitempty"`
+	BlockUnknownLicense bool     `json:"block_unknown_license,omitempty"`
+
+	// RequireSignature (docker only) refuses manifest pulls by tag
+	// when no cosign/notation signature referrer exists.
+	RequireSignature bool `json:"require_signature,omitempty"`
 }
 
 // RegistryRetentionPolicy stores default cleanup windows for the
@@ -179,6 +255,16 @@ type RegistryRetentionPolicy struct {
 	// AbandonedUploadMaxAgeSeconds controls stale upload tmp pruning.
 	// Zero means use the server default.
 	AbandonedUploadMaxAgeSeconds int64 `json:"abandoned_upload_max_age_seconds,omitempty"`
+
+	// KeepLastVersions keeps only the newest N versions of each
+	// package when retention is applied (all local types). 0 = off.
+	KeepLastVersions int `json:"keep_last_versions,omitempty"`
+	// MaxVersionAgeDays deletes versions older than N days, never
+	// removing the newest version. 0 = off.
+	MaxVersionAgeDays int `json:"max_version_age_days,omitempty"`
+	// KeepPatterns are version patterns (path.Match) never deleted
+	// by retention.
+	KeepPatterns []string `json:"keep_patterns,omitempty"`
 }
 
 // RegistryUpstream is one prefix-routed upstream for a remote
@@ -231,6 +317,29 @@ const (
 	RegistryTypePyPI  = "pypi"
 	RegistryTypeCargo = "cargo"
 
+	RegistryTypeGeneric     = "generic"
+	RegistryTypeNuGet       = "nuget"
+	RegistryTypeRubyGems    = "rubygems"
+	RegistryTypeComposer    = "composer"
+	RegistryTypeTerraform   = "terraform"
+	RegistryTypePub         = "pub"
+	RegistryTypeSwift       = "swift"
+	RegistryTypeAPT         = "apt"
+	RegistryTypeRPM         = "rpm"
+	RegistryTypeAlpine      = "alpine"
+	RegistryTypeConda       = "conda"
+	RegistryTypeHuggingFace = "huggingface"
+	RegistryTypeConan       = "conan"
+	RegistryTypeCRAN        = "cran"
+	RegistryTypeVagrant     = "vagrant"
+	RegistryTypeAnsible     = "ansible"
+	RegistryTypePuppet      = "puppet"
+	RegistryTypeChef        = "chef"
+	RegistryTypeCocoaPods   = "cocoapods"
+	RegistryTypeBower       = "bower"
+	RegistryTypeGitLFS      = "gitlfs"
+	RegistryTypeP2          = "p2"
+
 	RegistryKindLocal   = "local"
 	RegistryKindRemote  = "remote"
 	RegistryKindVirtual = "virtual"
@@ -252,6 +361,54 @@ var KnownRegistryTypes = []string{
 	RegistryTypeMaven,
 	RegistryTypePyPI,
 	RegistryTypeCargo,
+	RegistryTypeGeneric,
+	RegistryTypeNuGet,
+	RegistryTypeRubyGems,
+	RegistryTypeComposer,
+	RegistryTypeTerraform,
+	RegistryTypePub,
+	RegistryTypeSwift,
+	RegistryTypeAPT,
+	RegistryTypeRPM,
+	RegistryTypeAlpine,
+	RegistryTypeConda,
+	RegistryTypeHuggingFace,
+	RegistryTypeConan,
+	RegistryTypeCRAN,
+	RegistryTypeVagrant,
+	RegistryTypeAnsible,
+	RegistryTypePuppet,
+	RegistryTypeChef,
+	RegistryTypeCocoaPods,
+	RegistryTypeBower,
+	RegistryTypeGitLFS,
+	RegistryTypeP2,
+}
+
+// RegistryTypesWithPrefixUpstreams lists the protocols whose remote
+// kind honours RegistryRepository.Upstreams (longest-prefix routing
+// on the package name).
+var RegistryTypesWithPrefixUpstreams = []string{
+	RegistryTypeGo,
+	RegistryTypeNPM,
+	RegistryTypeMaven,
+}
+
+// RegistryTypesWithSigning lists the protocols whose local kind
+// signs generated repository metadata with RegistryRepository.SigningKey.
+var RegistryTypesWithSigning = []string{
+	RegistryTypeAPT,
+	RegistryTypeRPM,
+	RegistryTypeAlpine,
+}
+
+func registryTypeIn(t string, list []string) bool {
+	for _, k := range list {
+		if t == k {
+			return true
+		}
+	}
+	return false
 }
 
 // IsKnownRegistryType reports whether t is one of the registered

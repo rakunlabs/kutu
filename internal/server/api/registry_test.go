@@ -19,6 +19,9 @@ import (
 // returns empty data; the routing tests below only need Handle to wire
 // without panicking and the registry feature gate to read flags.
 type memStore struct {
+	// AuthStore is left nil: these routing tests never reach user,
+	// session or token storage.
+	service.AuthStore
 	meta map[string][]byte
 }
 
@@ -89,14 +92,24 @@ func (m *memStore) SetMeta(_ context.Context, key string, value any) error {
 	return nil
 }
 
+// testHandle wires Handle onto one mux used as all three route groups.
+// Requests carry whatever capabilities the test planted on their context.
+func testHandle(t *testing.T, mux *ada.Mux, rh *RawHandler) {
+	t.Helper()
+	if err := Handle(t.Context(), Muxes{Public: mux, Protected: mux, Data: mux}, Deps{
+		Svc:        service.New(newMemStore()),
+		RawHandler: rh,
+	}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+}
+
 func TestHandleRegistersRoutesWithoutGreedyPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	rh := NewRawHandler(nil, ctx, nil)
 
-	if err := Handle(ada.NewMux(), service.New(newMemStore()), Info{}, rh, nil, nil, nil, nil); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
+	testHandle(t, ada.NewMux(), rh)
 }
 
 func TestRegistryListenerRoutes(t *testing.T) {
@@ -104,16 +117,16 @@ func TestRegistryListenerRoutes(t *testing.T) {
 	t.Cleanup(cancel)
 	rh := NewRawHandler(nil, ctx, nil)
 	server := ada.New()
-	if err := Handle(server.Mux, service.New(newMemStore()), Info{}, rh, nil, nil, nil, nil); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
+	testHandle(t, server.Mux, rh)
 
 	for _, path := range []string{
 		"/api/v1/registries/listeners",
 		"/api/v1/registries/listeners/status",
 	} {
 		rec := httptest.NewRecorder()
-		server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req = req.WithContext(service.WithCapabilities(req.Context(), []string{service.CapRegistryAdmin}))
+		server.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET %s status = %d, want 200; body=%s", path, rec.Code, rec.Body.String())
 		}
@@ -126,9 +139,7 @@ func TestRegistryAdminActionRoutesDoNotFallThroughToSPAFallback(t *testing.T) {
 	rh := NewRawHandler(nil, ctx, nil)
 
 	server := ada.New()
-	if err := Handle(server.Mux, service.New(newMemStore()), Info{}, rh, nil, nil, nil, nil); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
+	testHandle(t, server.Mux, rh)
 	server.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -143,7 +154,7 @@ func TestRegistryAdminActionRoutesDoNotFallThroughToSPAFallback(t *testing.T) {
 	}{
 		{"test upstream", http.MethodPost, "/api/v1/registries/npm/default/npm/test-upstream", service.CapRegistryAdmin},
 		{"stats", http.MethodGet, "/api/v1/registries/npm/default/npm/stats", service.CapRegistryRead},
-		{"purge", http.MethodPost, "/api/v1/registries/npm/default/npm/purge", service.CapRegistryAdmin},
+		{"purge", http.MethodPost, "/api/v1/registries/npm/default/npm/purge", service.CapRegistryDelete},
 	}
 
 	for _, tc := range cases {
@@ -294,5 +305,41 @@ func TestRegistrySettingsForResponseIncludesSecretsForAdmin(t *testing.T) {
 	got := registrySettingsForResponse(rs, true)
 	if got.Namespaces[0].Repositories[0].Auth.Token != "tk_secret" {
 		t.Fatalf("admin response should include secret, got %+v", got.Namespaces[0].Repositories[0].Auth)
+	}
+}
+
+func TestRegistryAdminRoutesEnforceCapabilities(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	server := ada.New()
+	testHandle(t, server.Mux, NewRawHandler(nil, ctx, nil))
+
+	cases := []struct {
+		name     string
+		method   string
+		path     string
+		caps     []string
+		patterns map[string][]string
+		want     int
+	}{
+		{"listeners without admin", http.MethodGet, "/api/v1/registries/listeners", []string{service.CapRegistryRead}, nil, http.StatusForbidden},
+		{"stats without read", http.MethodGet, "/api/v1/registries/npm/default/npm/stats", nil, nil, http.StatusForbidden},
+		{"stats outside pattern", http.MethodGet, "/api/v1/registries/npm/default/npm/stats",
+			[]string{service.CapRegistryRead}, map[string][]string{service.CapRegistryRead: {"team-a/**"}}, http.StatusForbidden},
+		{"purge with read only", http.MethodPost, "/api/v1/registries/npm/default/npm/purge", []string{service.CapRegistryRead}, nil, http.StatusForbidden},
+		{"users without manage", http.MethodGet, "/api/v1/users", []string{service.CapRegistryAdmin}, nil, http.StatusForbidden},
+		{"auth settings without manage", http.MethodGet, "/api/v1/settings/auth", []string{service.CapUsersManage}, nil, http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rctx := service.WithCapabilities(req.Context(), tc.caps)
+			rctx = service.WithCapabilityPatterns(rctx, tc.patterns)
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, req.WithContext(rctx))
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
 	}
 }

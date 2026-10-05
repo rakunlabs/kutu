@@ -160,11 +160,26 @@ func (c *Client) Head(ctx context.Context, pathOrURL string) (*Response, error) 
 	return c.do(ctx, http.MethodHead, pathOrURL)
 }
 
+// GetWithHeaders is Get with extra request headers (e.g. Accept,
+// Range). The configured upstream auth is still applied last.
+func (c *Client) GetWithHeaders(ctx context.Context, pathOrURL string, hdr http.Header) (*Response, error) {
+	return c.doWith(ctx, http.MethodGet, pathOrURL, hdr)
+}
+
 func (c *Client) do(ctx context.Context, method, pathOrURL string) (*Response, error) {
+	return c.doWith(ctx, method, pathOrURL, nil)
+}
+
+func (c *Client) doWith(ctx context.Context, method, pathOrURL string, hdr http.Header) (*Response, error) {
 	url := c.resolveURL(pathOrURL)
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("upstream %s %s: build request: %w", method, url, err)
+	}
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	if err := c.applyAuth(ctx, req); err != nil {
 		return nil, fmt.Errorf("upstream %s %s: auth: %w", method, url, err)

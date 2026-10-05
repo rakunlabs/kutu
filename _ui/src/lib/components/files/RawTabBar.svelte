@@ -74,18 +74,18 @@
 
 <svelte:window onclick={handleWindowClick} />
 
-<div class="flex items-stretch bg-slate-100 dark:bg-warm-800 border-b border-slate-200 dark:border-warm-700 min-h-[35px] overflow-hidden">
+<div class="flex items-stretch bg-slate-50 dark:bg-warm-900 border-b border-slate-200 dark:border-warm-700 min-h-[35px] overflow-hidden">
   {#if filesStore.openTabs.length === 0}
-  <div class="flex items-center px-4 text-gray-400 dark:text-slate-500 text-[13px]">No files open</div>
+  <div class="flex items-center px-4 text-slate-500 dark:text-warm-400 text-[13px]">No files open</div>
   {:else}
   <div class="flex items-stretch overflow-x-auto overflow-y-hidden flex-1 scrollbar-thin scrollbar-track-slate-200 scrollbar-thumb-slate-400">
   {#each filesStore.openTabs as tab (tab.id)}
   {@const isActive = filesStore.activeTabId === tab.id}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-  class="group flex items-center gap-1.5 pl-3 pr-2 bg-transparent border-none border-r border-slate-200 dark:border-warm-700 cursor-pointer text-[13px] whitespace-nowrap min-w-0 max-w-[200px] transition-colors
+  class="group flex items-center gap-1.5 pl-3 pr-2 bg-transparent border-none border-r border-slate-200 dark:border-warm-700 cursor-pointer text-[13px] whitespace-nowrap min-w-0 max-w-[200px] 
   {isActive
-    ? 'bg-white dark:bg-warm-900 text-slate-800 dark:text-white border-b-2 border-b-accent-600 -mb-px'
+    ? 'bg-white dark:bg-warm-950 text-slate-900 dark:text-warm-50 shadow-[inset_0_2px_0_var(--sec-500)]'
     : 'text-slate-500 dark:text-warm-200 hover:bg-slate-200 dark:hover:bg-warm-700'}"
  onclick={() => filesStore.selectTab(tab.id)}
  onauxclick={(e) => handleMiddleClick(e, tab.id)}
@@ -96,14 +96,14 @@
  tabindex="0"
  aria-selected={isActive}
  >
- <span class="flex items-center shrink-0 {isActive ? 'text-gray-500 dark:text-slate-400' : 'text-gray-400 dark:text-slate-500'}">
+ <span class="flex items-center shrink-0 {isActive ? 'text-accent-600 dark:text-accent-300' : 'text-slate-500 dark:text-warm-400'}">
  <FileText size={14} />
  </span>
  <span class="overflow-hidden text-ellipsis">{tab.name}</span>
  <button
- class="flex items-center justify-center p-0.5 rounded text-gray-400 dark:text-slate-500 bg-transparent border-none cursor-pointer transition-all
+ class="flex items-center justify-center p-0.5 rounded text-slate-500 dark:text-warm-400 bg-transparent border-none cursor-pointer transition-all
  opacity-0 group-hover:opacity-100
- hover:bg-red-600 hover:text-white"
+ hover:bg-vermilion-600 hover:text-white"
  onclick={(e) => handleCloseTab(e, tab.id)}
  aria-label="Close tab"
  >
@@ -115,7 +115,7 @@
 
  <!-- Close All button -->
  <button
- class="flex items-center justify-center px-2 shrink-0 text-gray-400 dark:text-slate-500 bg-transparent border-none border-l border-slate-200 dark:border-warm-700 cursor-pointer transition-colors hover:text-red-500 hover:bg-slate-200 dark:hover:bg-warm-700"
+ class="flex items-center justify-center px-2 shrink-0 text-slate-500 dark:text-warm-400 bg-transparent border-none border-l border-slate-200 dark:border-warm-700 cursor-pointer transition-colors hover:text-vermilion-500 hover:bg-slate-200 dark:hover:bg-warm-700"
  onclick={() => filesStore.closeAllTabs()}
  title="Close all tabs"
  aria-label="Close all tabs"
@@ -131,20 +131,20 @@
  <div
  role="menu"
  tabindex="-1"
- class="fixed z-50 min-w-44 py-1 bg-white dark:bg-warm-900 border border-slate-200 dark:border-warm-700 rounded-lg shadow-xl text-[13px]"
+ class="fixed z-50 min-w-44 py-1 bg-white dark:bg-warm-900 border border-slate-200 dark:border-warm-700 rounded-[3px] shadow-[0_8px_24px_-6px_rgb(0_0_0/0.3)] text-[13px]"
  style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
  onclick={(e) => e.stopPropagation()}
  onkeydown={(e) => e.stopPropagation()}
  >
  <button
- class="flex items-center w-full px-3 py-1.5 text-left text-slate-700 dark:text-slate-200 bg-transparent border-none cursor-pointer hover:bg-slate-100 dark:hover:bg-warm-700 transition-colors"
+ class="flex items-center w-full px-3 py-1.5 text-left text-slate-700 dark:text-warm-200 bg-transparent border-none cursor-pointer hover:bg-slate-100 dark:hover:bg-warm-700 transition-colors"
  onclick={ctxClose}
  >
  Close
  </button>
  <button
  class="flex items-center w-full px-3 py-1.5 text-left bg-transparent border-none cursor-pointer transition-colors
- {hasMultipleTabs ? 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-warm-700' : 'text-slate-300 cursor-default'}"
+ {hasMultipleTabs ? 'text-slate-700 dark:text-warm-200 hover:bg-slate-100 dark:hover:bg-warm-700' : 'text-slate-300 cursor-default'}"
  onclick={ctxCloseOthers}
  disabled={!hasMultipleTabs}
  >
@@ -152,7 +152,7 @@
  </button>
  <button
  class="flex items-center w-full px-3 py-1.5 text-left bg-transparent border-none cursor-pointer transition-colors
- {hasTabsToRight ? 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-warm-700' : 'text-slate-300 cursor-default'}"
+ {hasTabsToRight ? 'text-slate-700 dark:text-warm-200 hover:bg-slate-100 dark:hover:bg-warm-700' : 'text-slate-300 cursor-default'}"
  onclick={ctxCloseToRight}
  disabled={!hasTabsToRight}
  >
@@ -160,7 +160,7 @@
  </button>
  <button
  class="flex items-center w-full px-3 py-1.5 text-left bg-transparent border-none cursor-pointer transition-colors
- {hasTabsToLeft ? 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-warm-700' : 'text-slate-300 cursor-default'}"
+ {hasTabsToLeft ? 'text-slate-700 dark:text-warm-200 hover:bg-slate-100 dark:hover:bg-warm-700' : 'text-slate-300 cursor-default'}"
  onclick={ctxCloseToLeft}
  disabled={!hasTabsToLeft}
  >
@@ -168,7 +168,7 @@
  </button>
  <div class="my-1 border-t border-slate-150 dark:border-warm-700"></div>
  <button
- class="flex items-center w-full px-3 py-1.5 text-left text-red-600 bg-transparent border-none cursor-pointer hover:bg-red-50 transition-colors"
+ class="flex items-center w-full px-3 py-1.5 text-left text-vermilion-600 bg-transparent border-none cursor-pointer hover:bg-vermilion-50 transition-colors"
  onclick={ctxCloseAll}
  >
  Close All

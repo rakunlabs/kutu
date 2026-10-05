@@ -62,9 +62,9 @@
         }
     > = {
         info: {
-            bg: "bg-slate-800",
-            border: "border-slate-700",
-            text: "text-slate-100",
+            bg: "bg-warm-900",
+            border: "border-warm-700",
+            text: "text-warm-50",
             // Info uses the cool palette so it stays visually distinct from
             // the brand red used for primary actions and the red used for
             // alerts. Brand red on an info toast would muddle the semantics.
@@ -72,25 +72,25 @@
             progress: "bg-cool-300",
         },
         success: {
-            bg: "bg-slate-800",
-            border: "border-slate-700",
-            text: "text-slate-100",
+            bg: "bg-warm-900",
+            border: "border-warm-700",
+            text: "text-warm-50",
             icon: "text-emerald-400",
             progress: "bg-emerald-400",
         },
         warn: {
-            bg: "bg-slate-800",
-            border: "border-slate-700",
-            text: "text-slate-100",
+            bg: "bg-warm-900",
+            border: "border-warm-700",
+            text: "text-warm-50",
             icon: "text-amber-400",
             progress: "bg-amber-400",
         },
         alert: {
-            bg: "bg-slate-800",
-            border: "border-slate-700",
-            text: "text-slate-100",
-            icon: "text-red-400",
-            progress: "bg-red-400",
+            bg: "bg-warm-900",
+            border: "border-warm-700",
+            text: "text-warm-50",
+            icon: "text-vermilion-400",
+            progress: "bg-vermilion-400",
         },
     };
 
@@ -132,7 +132,7 @@
         {@const Icon = iconMap[toast.type]}
         {@const progress = getProgress(toast)}
         <div
-            class="{style.bg} {style.text} border {style.border} rounded-lg shadow-lg shadow-black/20 pointer-events-auto overflow-hidden"
+            class="{style.bg} {style.text} border {style.border} rounded-[3px] shadow-[0_8px_24px_-6px_rgb(0_0_0/0.4)] pointer-events-auto overflow-hidden"
             in:slideIn={{ duration: 250 }}
             out:slideOut={{ duration: 200 }}
         >
@@ -144,7 +144,7 @@
                     {toast.message}
                 </p>
                 <button
-                    class="shrink-0 p-0.5 text-slate-500 dark:text-slate-400 bg-transparent border-none rounded cursor-pointer transition-colors hover:text-slate-200 hover:bg-slate-700"
+                    class="shrink-0 p-0.5 text-slate-500 dark:text-slate-400 bg-transparent border-none rounded cursor-pointer transition-colors hover:text-slate-200 hover:bg-warm-700"
                     onclick={() => removeToast(toast.id)}
                     aria-label="Dismiss"
                 >
@@ -152,7 +152,7 @@
                 </button>
             </div>
             {#if toast.duration > 0}
-                <div class="h-[2px] w-full bg-slate-700/50">
+                <div class="h-[2px] w-full bg-warm-700/60">
                     <div
                         class="{style.progress} h-full transition-none"
                         style="width: {progress}%"

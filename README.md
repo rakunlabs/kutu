@@ -11,7 +11,9 @@ Runs as one binary backed by PostgreSQL, with no authentication layer in front o
 
 ## Features
 
-- **Artifact registry** — npm, Go, Docker, Helm, Maven, PyPI and Cargo, proxying or hosting locally.
+- **Artifact registry** — 29 formats (npm, Go, Docker/OCI, Helm, Maven, PyPI, Cargo, NuGet, RubyGems, Composer, Terraform, pub, Swift, APT, RPM, Alpine, Conda, Hugging Face, Conan, CRAN, Vagrant, Ansible, Puppet, Chef, CocoaPods, Bower, Git LFS, p2 and generic files), hosted locally, proxied from upstreams or aggregated into virtual repos.
+- **Supply-chain policies** — include/exclude lists, OSV vulnerability and license gates, quarantine windows, signature requirements, immutable versions, quotas and retention.
+- **Registry operations** — cross-repo search, promotion, export/import, replication, scheduled prefetch and Prometheus metrics.
 - **Raw mounts** — browse and serve files from local disk, S3, FTP, SFTP, WebDAV or Vercel Blob.
 - **File serving** — expose those mounts over **FTP**, **SFTP**, **TFTP**, **WebDAV** and an **S3-compatible API** with shared users and shares.
 - **Proxy** — build reverse-proxy graphs (listeners, middlewares, handlers) from the UI.
@@ -70,7 +72,7 @@ S3 and WebDAV servers can share a port with each other or with dedicated package
 
 ## Registry listeners
 
-Repositories remain available under `/registries/{namespace}/{repo}/...` on the main HTTP server. Use **Registries → Listeners** to additionally publish one repository at the root of a dedicated hostname or port. This supports Docker's required `/v2/...` root path, per-repository ports, shared-port virtual hosts, and optional per-hostname TLS.
+Repositories remain available under `/registries/{namespace}/{repo}/...` on the main HTTP server. Use **Listeners → Registry** to additionally publish one repository at the root of a dedicated hostname or port. This supports Docker's required `/v2/...` root path, per-repository ports, shared-port virtual hosts, and optional per-hostname TLS.
 
 ## License
 

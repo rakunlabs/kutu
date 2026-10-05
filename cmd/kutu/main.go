@@ -62,6 +62,7 @@ func run(ctx context.Context) error {
 
 	// Service core.
 	svc := service.New(store)
+	defer svc.Close()
 	svc.SetKeyManager(mgr)
 
 	// Bootstrap: if a verifier already exists on disk, engage the

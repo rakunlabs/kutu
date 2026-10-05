@@ -33,7 +33,6 @@ type Local struct {
 	namespace string
 	name      string
 	store     *Store
-	signer    TokenSigner
 
 	allowPush                    bool
 	maxUpload                    int64
@@ -70,12 +69,6 @@ func NewLocalFactory() registry.Factory {
 		if err != nil {
 			return nil, fmt.Errorf("docker/local %s/%s: blobstore: %w", ns, r.Name, err)
 		}
-		// Default-signer key is a random per-process value when no
-		// pika-wide signer is wired. JWTs issued by this Registry
-		// don't survive a restart (clients re-auth on 401), which
-		// is acceptable; a future enhancement plumbs the pika
-		// encryption key through Deps as the signer source.
-		signer := NewStaticSigner(randomKey())
 
 		immutableTags, gcMinAge, abandonedUploadMaxAge := policyDefaults(r.Policy)
 
@@ -83,7 +76,6 @@ func NewLocalFactory() registry.Factory {
 			namespace:                    ns,
 			name:                         r.Name,
 			store:                        NewStore(fs, blobs, r.BasePath),
-			signer:                       signer,
 			allowPush:                    r.AllowPush,
 			maxUpload:                    r.MaxUploadSize,
 			immutableTags:                immutableTags,
@@ -199,8 +191,6 @@ func (l *Local) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch req.Op {
 	case opVersionProbe:
 		l.serveVersionProbe(w, r)
-	case opToken:
-		l.serveToken(w, r)
 	case opCatalog:
 		l.serveCatalog(w, r)
 	case opTagsList:
@@ -228,86 +218,12 @@ func (l *Local) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // ─── /v2/ — version probe ─────────────────────────────────────────
 
-// serveVersionProbe handles GET /v2/. Unauthenticated probe → 401
-// + WWW-Authenticate. Authenticated probe → 200 with empty body.
-//
-// "Authenticated" here means: a valid bearer JWT, OR a pika token
-// passed as Bearer/Basic. The latter lets test scripts and the UI
-// skip the token-exchange dance.
-func (l *Local) serveVersionProbe(w http.ResponseWriter, r *http.Request) {
-	if l.authenticated(r) {
-		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	challenge(w, r, "authentication required")
-}
-
-// authenticated reports whether the request carries credentials we
-// accept: a valid Docker bearer JWT, OR a pika token (Bearer/Basic).
-// The entry handler in api/registry.go has already validated the
-// pika token for any operation that requires capability; this
-// helper just lets us complete the docker challenge dance.
-func (l *Local) authenticated(r *http.Request) bool {
-	auth := r.Header.Get("Authorization")
-	switch {
-	case strings.HasPrefix(auth, "Bearer "):
-		// Try our JWT first; on failure fall through to "treat as
-		// pika token" because the entry handler may have already
-		// validated it.
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if _, err := verifyToken(l.signer, token); err == nil {
-			return true
-		}
-		// If the bearer looks like a pika token (starts with
-		// "pika_"), assume the entry handler validated it — the
-		// data-mux dispatch already enforces the capability check
-		// before we reach here.
-		return strings.HasPrefix(token, "pika_")
-	case strings.HasPrefix(auth, "Basic "):
-		return true
-	}
-	return false
-}
-
-// ─── /v2/token — bearer token issuance ────────────────────────────
-
-// serveToken handles GET /v2/token?service=&scope=. The client
-// presents Basic auth (pika token in the password slot); we
-// validate the token via the pika-wide auth path (which has
-// already happened at the entry handler if the call reached here),
-// then mint a JWT carrying the scope.
-//
-// For the MVP we trust the entry handler's auth gating: any
-// request that lands here has already been verified by the
-// data-mux entry. We just produce a token bound to the requested
-// scope and a short expiry.
-func (l *Local) serveToken(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	scope := q.Get("scope")
-	if scope == "" {
-		scope = "repository:" + l.name + ":pull"
-	}
-
-	subject, _, _ := r.BasicAuth()
-	if subject == "" {
-		subject = "anonymous"
-	}
-
-	token, err := issueToken(l.signer, subject, scope)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TOKEN_FAILURE", err.Error())
-		return
-	}
-	resp := map[string]any{
-		"token":        token,
-		"access_token": token,
-		"expires_in":   int(tokenLifetime.Seconds()),
-		"issued_at":    timeNowRFC3339(),
-	}
-	w.Header().Set("Content-Type", "application/json")
+// serveVersionProbe handles GET /v2/. Authentication (including the
+// Docker bearer challenge and /v2/token) is enforced by kutu's registry
+// entry handler before the request reaches the registry.
+func (l *Local) serveVersionProbe(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // ─── /v2/_catalog ─────────────────────────────────────────────────
@@ -899,13 +815,6 @@ func newUploadUUID() string {
 // token issuance responses.
 func timeNowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
-}
-
-// randomKey generates a 32-byte secret used for HMAC signing.
-func randomKey() []byte {
-	buf := make([]byte, 32)
-	_, _ = io.ReadFull(rand.Reader, buf)
-	return buf
 }
 
 // _ kept across optional refactors.

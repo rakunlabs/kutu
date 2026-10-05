@@ -525,8 +525,10 @@ func TestValidate_Upstreams(t *testing.T) {
 			[]RegistryUpstream{{Prefix: "github.com/acme/", URL: "https://a",
 				Auth: &RegistryUpstreamAuth{Type: "bearer"}}, // missing token
 			}, true},
-		{"non-go type rejected", RegistryTypeNPM,
-			[]RegistryUpstream{{Prefix: "@acme/", URL: "https://a"}}, true},
+		{"npm scope routing accepted", RegistryTypeNPM,
+			[]RegistryUpstream{{Prefix: "@acme/", URL: "https://a"}}, false},
+		{"unsupported type rejected", RegistryTypeDocker,
+			[]RegistryUpstream{{Prefix: "acme/", URL: "https://a"}}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

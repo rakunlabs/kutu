@@ -17,7 +17,7 @@ import (
 // URL. Packument requests merge versions from every member; tarball
 // requests use first-hit-wins. Writes are rejected.
 //
-// Merge semantics for packument
+// # Merge semantics for packument
 //
 // Each member's packument is fetched, the versions maps are unioned,
 // dist-tags are merged with the first member's value winning on
@@ -59,6 +59,10 @@ func (v *Virtual) PackageDetail(ctx context.Context, name string) (*registry.Pac
 
 // ServeHTTP dispatches.
 func (v *Virtual) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if isAuditPath(r.URL.Path) {
+		v.serveAudit(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "virtual registries are read-only")
 		return
@@ -86,9 +90,13 @@ func (v *Virtual) servePackumentUnion(w http.ResponseWriter, r *http.Request, na
 		"name":      name,
 		"versions":  map[string]any{},
 		"dist-tags": map[string]any{},
+		"time":      map[string]any{},
 	}
 	hit := false
 	v.ForEachMember(func(mem registry.Registry) bool {
+		if _, _, ok := registry.CheckGate(mem, r); !ok {
+			return false
+		}
 		rec := httptest.NewRecorder()
 		mem.ServeHTTP(rec, r)
 		if rec.Code != http.StatusOK {
@@ -118,8 +126,16 @@ func (v *Virtual) servePackumentUnion(w http.ResponseWriter, r *http.Request, na
 				}
 			}
 		}
+		if memTime, ok := memPkg["time"].(map[string]any); ok {
+			mergedTime := merged["time"].(map[string]any)
+			for k, t := range memTime {
+				if _, exists := mergedTime[k]; !exists {
+					mergedTime[k] = t
+				}
+			}
+		}
 		// First-member-wins on top-level fields.
-		for _, k := range []string{"description", "readme", "maintainers", "repository", "_id", "_rev"} {
+		for _, k := range []string{"description", "readme", "maintainers", "repository", "homepage", "license", "keywords", "bugs", "author", "_id", "_rev"} {
 			if _, has := merged[k]; has {
 				continue
 			}

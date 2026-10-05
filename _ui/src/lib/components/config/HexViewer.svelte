@@ -117,7 +117,7 @@
 <div class="flex flex-col h-full bg-[#1e1e1e] font-mono text-[13px]">
     <!-- Header -->
     <div
-        class="px-4 py-1.5 bg-[#252526] border-b border-[#3c3c3c] text-[10px] text-gray-500 dark:text-slate-400 select-none shrink-0 whitespace-pre"
+        class="px-4 py-1.5 bg-[#252526] border-b border-[#3c3c3c] text-[11px] text-gray-500 dark:text-warm-400 select-none shrink-0 whitespace-pre"
     >
         Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F Decoded text
     </div>
@@ -143,7 +143,7 @@
 
     <!-- Footer -->
     <div
-        class="flex items-center justify-between px-4 py-1 bg-[#252526] border-t border-[#3c3c3c] text-[10px] text-gray-500 dark:text-slate-400 shrink-0"
+        class="flex items-center justify-between px-4 py-1 bg-[#252526] border-t border-[#3c3c3c] text-[11px] text-gray-500 dark:text-warm-400 shrink-0"
     >
         <span>{formatSize(bytes.length)}</span>
         <span>{totalRows.toLocaleString()} rows</span>

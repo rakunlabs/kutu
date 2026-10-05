@@ -1,0 +1,891 @@
+<script lang="ts">
+    import { apiErrorMessage, apiServerMessage, apiErrorStatus, apiErrorCode } from "@/lib/api/client";
+    import { appStore } from "@/lib/store/store.svelte";
+    import {
+        Boxes,
+        LogIn,
+        UserPlus,
+        ExternalLink,
+        Key,
+        ShieldCheck,
+        ArrowLeft,
+        ChevronDown,
+        ChevronRight,
+    } from "lucide-svelte";
+    import { onMount, onDestroy } from "svelte";
+    import type { LoginStrategy } from "@/lib/store/store.svelte";
+    import ThemeSwitcher from "@/lib/components/ThemeSwitcher.svelte";
+    import axios from "axios";
+    import { withBasePath, withoutBasePath } from "@/lib/basepath";
+    import {
+        isWebAuthnSupported,
+        isConditionalMediationAvailable,
+        startAuthentication,
+        type ServerRequestOptions,
+    } from "@/lib/webauthn";
+
+    let loading = $state(false);
+    let infoLoading = $state(true);
+    let infoError = $state("");
+    let error = $state("");
+
+    // signup_first: show register form first when the server requests it
+    let showRegister = $state(false);
+    let showCollapsedLocalLogin = $state(false);
+
+    // Track form field values keyed by field name
+    let loginFields = $state<Record<string, string>>({});
+    let registerFields = $state<Record<string, string>>({});
+
+    // MFA / TOTP step-up state. When the password POST returns a
+    // `phase: totp_required` response, we stash the session id + url
+    // here and flip the form into "enter your TOTP code" mode. The
+    // sessionUrl is the same /login/pass/<name> the password went to —
+    // phase-2 is dispatched server-side by body shape.
+    interface MFAChallenge {
+        url: string;
+        sessionID: string;
+        strategy: string;
+        expiresIn: number;
+    }
+    let mfaChallenge = $state<MFAChallenge | null>(null);
+    let mfaCode = $state("");
+
+    const loginInfo = $derived(appStore.loginInfo);
+
+    // The first password strategy (if any).
+    // Defensive: when /login/info isn't reachable (e.g. the SPA fallback
+    // returned index.html as a 200, or a misconfigured backend returned
+    // an object without `strategies`), `loginInfo.strategies` is
+    // undefined. Calling `.find` on undefined throws synchronously inside
+    // the $derived, which freezes the whole reactive graph and leaves the
+    // app stuck on the App.svelte loading state. Treat any non-array as
+    // an empty list.
+    const strategies = $derived(
+        Array.isArray(loginInfo?.strategies) ? loginInfo!.strategies : [],
+    );
+
+    const firstPasswordStrategy = $derived(
+        strategies.find((s) => s.kind === "password") ?? null,
+    );
+    const localPasswordStrategy = $derived(
+        strategies.find(
+            (s) =>
+                s.kind === "password" &&
+                s.name === appStore.info?.local_login_name,
+        ) ?? null,
+    );
+    const localLoginIsCollapsed = $derived(
+        !!localPasswordStrategy &&
+            !!appStore.info?.local_login_form_collapsed &&
+            !loginInfo?.signup_first,
+    );
+    const passwordStrategy = $derived(
+        localLoginIsCollapsed
+            ? showCollapsedLocalLogin
+                ? localPasswordStrategy
+                : (strategies.find(
+                      (s) =>
+                          s.kind === "password" &&
+                          s.name !== appStore.info?.local_login_name,
+                  ) ?? null)
+            : firstPasswordStrategy,
+    );
+
+    // All oauth2 strategies
+    const oauthStrategies = $derived(
+        strategies.filter((s) => s.kind === "oauth2"),
+    );
+
+    // Passkey strategy. The backend advertises kind="passkey" via the
+    // ada/passkey Strategy.Descriptor — the login URL is the same
+    // /login/pass/<name> endpoint as a password strategy, but the body
+    // shape is different (it dispatches between begin/finish via the
+    // assertion field's presence). We never POST a form to that URL
+    // ourselves; the SPA runs the WebAuthn ceremony and uses two
+    // explicit calls instead.
+    const passkeyStrategy = $derived(
+        strategies.find((s) => s.kind === "passkey") ?? null,
+    );
+    const passkeySupported = $derived(isWebAuthnSupported());
+
+    // Conditional mediation ("autofill UI") is gated on a runtime feature
+    // probe — Safari 16+, Chrome 108+, Firefox is partial. When available
+    // we paint `autocomplete="username webauthn"` on the username input
+    // so the browser surfaces enrolled passkeys inline with autofill, and
+    // we kick off a non-blocking conditional get() ceremony that resolves
+    // when the user picks a passkey from the dropdown.
+    let conditionalSupported = $state(false);
+    let conditionalController: AbortController | null = null;
+
+    // Used as the `autocomplete` token suffix when conditional UI is on.
+    // Field name heuristic: we treat anything that looks like a username
+    // field (the password strategy's first non-password field, or fields
+    // named "username"/"email"/"user") as the surface for the webauthn
+    // hint. Other text fields keep their original autocomplete value so
+    // we don't disturb password manager autofill on, say, an org-name
+    // input.
+    //
+    // The return type is widened to `any` because the WebIDL FullAutoFill
+    // union doesn't model multi-token compound values like
+    // `"username webauthn"` cleanly — the HTML spec allows it (the
+    // browser parses it as autofill field + credential type) but the
+    // TypeScript DOM types reject it. Using `any` here is the smallest
+    // escape hatch; the value still flows into the autocomplete
+    // attribute verbatim.
+    function passkeyAutocomplete(fieldName: string, fieldType: string): any {
+        if (fieldType === "password") return "current-password";
+        if (!passkeyStrategy || !conditionalSupported) return fieldName;
+        const looksLikeUsername =
+            fieldName === "username" ||
+            fieldName === "email" ||
+            fieldName === "user";
+        return looksLikeUsername ? "username webauthn" : fieldName;
+    }
+
+    // Signup is only exposed in the UI during initial bootstrap (no users
+    // exist yet). Once the first admin is created, the server flips
+    // signup_first to false and the signup affordances disappear — further
+    // users are added by an admin from inside the app. The backend also
+    // refuses self-registration past bootstrap via LocalRegistrar, so this
+    // UI gate is purely about affordance.
+    const hasRegister = $derived(
+        !!passwordStrategy?.register && !!loginInfo?.signup_first,
+    );
+
+    onMount(async () => {
+        infoLoading = true;
+        infoError = "";
+        try {
+            await appStore.loadLoginInfo();
+            if (loginInfo?.signup_first && hasRegister) {
+                showRegister = true;
+            }
+            // Fire-and-forget the conditional-UI ceremony so the browser's
+            // autofill dropdown can surface enrolled passkeys the moment the
+            // user focuses the username field. We deliberately don't await
+            // this — the login form must stay interactive even when the
+            // conditional get() sits there for minutes waiting for the user
+            // to pick something.
+            if (passkeyStrategy) {
+                void tryConditionalAuth(passkeyStrategy);
+            }
+        } catch (err) {
+            infoError = apiServerMessage(err, "Failed to load login configuration");
+        } finally {
+            infoLoading = false;
+        }
+    });
+
+    onDestroy(() => {
+        // Cancel any in-flight conditional get() so a stale resolve can't
+        // race the next route — without this an autofill pick after the
+        // user navigates away would still try to post a finish request.
+        conditionalController?.abort();
+        conditionalController = null;
+        // Stop the OAuth popup poll if the component unmounts mid-flow (e.g.
+        // the auth gate swaps us out the instant identity refreshes).
+        stopOAuthPoll();
+    });
+
+    function getFieldValue(
+        fields: Record<string, string>,
+        name: string,
+    ): string {
+        return fields[name] ?? "";
+    }
+
+    function setFieldValue(
+        fields: Record<string, string>,
+        name: string,
+        value: string,
+    ): Record<string, string> {
+        return { ...fields, [name]: value };
+    }
+
+    async function handleLogin(strategy: LoginStrategy) {
+        // Cancel any in-flight conditional passkey ceremony. Submitting
+        // the password form is an explicit signal that the user doesn't
+        // want to use a passkey on this attempt; leaving the conditional
+        // get() running would race with the form post in some browsers.
+        conditionalController?.abort();
+        conditionalController = null;
+
+        error = "";
+        loading = true;
+        try {
+            const body: Record<string, string> = {};
+            for (const field of strategy.fields ?? []) {
+                body[field.name] = loginFields[field.name] ?? "";
+            }
+            const challenge = await appStore.loginWith(strategy.url, body);
+            if (challenge) {
+                // Server requires a second factor. Flip the form into TOTP mode;
+                // the user enters the 6-digit code (or a recovery code) and we
+                // POST it back to the same url with the session id we just got.
+                mfaChallenge = {
+                    url: strategy.url,
+                    sessionID: challenge.totp_session_id,
+                    strategy: challenge.strategy,
+                    expiresIn: challenge.expires_in,
+                };
+                mfaCode = "";
+                error = "";
+                return;
+            }
+            // Deliberately no location change here: App.svelte watches
+            // appStore.authenticated and swaps this Login component for the
+            // router once it flips true. The router reads location.hash, which
+            // still contains whatever deep-link the user was trying to reach
+            // (e.g. #/settings). Forcing location.href = '/' would wipe that
+            // hash and dump the user at the root.
+        } catch (err) {
+            error = apiServerMessage(err, "Login failed");
+        } finally {
+            loading = false;
+        }
+    }
+
+    async function handleMFASubmit() {
+        if (!mfaChallenge) return;
+        const code = mfaCode.trim();
+        // Accept either a 6-digit TOTP code or a 14-char recovery code
+        // (xxxx-xxxx-xxxx). The server validates the format too — this
+        // is just a UX trim.
+        if (!code) {
+            error = "Enter the 6-digit code or a recovery code";
+            return;
+        }
+        error = "";
+        loading = true;
+        try {
+            await appStore.finishMFA(
+                mfaChallenge.url,
+                mfaChallenge.sessionID,
+                code,
+            );
+            // On success App.svelte swaps us out of the login view.
+            mfaChallenge = null;
+            mfaCode = "";
+        } catch (err) {
+            error = apiServerMessage(err, "Verification failed");
+            // Don't clear mfaChallenge — the server only marks the session as
+            // consumed after a successful verification, so the user can retry
+            // with a fresh code from their authenticator. But the server-side
+            // ConsumePending actually drops the entry on first attempt; surface
+            // the message and let them retry from password.
+            if (
+                apiErrorStatus(err) === 401 &&
+                apiErrorCode(err) === "invalid_session"
+            ) {
+                // Session was already consumed or expired — start over.
+                mfaChallenge = null;
+                mfaCode = "";
+                error =
+                    "Your verification session expired. Please sign in again.";
+            }
+        } finally {
+            loading = false;
+        }
+    }
+
+    function cancelMFA() {
+        mfaChallenge = null;
+        mfaCode = "";
+        error = "";
+        // Note: the server's pending entry will sit until its TTL fires
+        // (5 min). We could call a dedicated cancel endpoint, but the
+        // one-shot semantics on the server side make a stale entry
+        // harmless — no second attempt is possible.
+    }
+
+    async function handleRegister(strategy: LoginStrategy) {
+        if (!strategy.register) return;
+        error = "";
+
+        // Client-side validation: catch obvious problems before the network
+        // round-trip. The backend also validates — this is just for responsive
+        // feedback. Keep in sync with the checks in ada's readRegister.
+        const fields = strategy.register.fields ?? [];
+        const declared = new Set(fields.map((f) => f.name));
+
+        // Required fields must be non-empty.
+        for (const field of fields) {
+            if (field.required && !(registerFields[field.name] ?? "").trim()) {
+                error = `${field.label || field.name} is required`;
+                return;
+            }
+        }
+
+        // Password confirmation must match the password field. We match by
+        // convention on the "password_confirm" name used by ada's default form.
+        if (declared.has("password_confirm")) {
+            const pw = registerFields["password"] ?? "";
+            const confirm = registerFields["password_confirm"] ?? "";
+            if (pw !== confirm) {
+                error = "Passwords do not match";
+                return;
+            }
+        }
+
+        loading = true;
+        try {
+            const body: Record<string, string> = {};
+            for (const field of fields) {
+                body[field.name] = registerFields[field.name] ?? "";
+            }
+            await appStore.registerWith(strategy.register.url, body);
+            if (!appStore.authenticated) {
+                // No auto-login: the server created the account but did not
+                // issue a session. Flip back to the login form so the user can
+                // sign in with the credentials they just set.
+                showRegister = false;
+                error = "";
+                registerFields = {};
+            }
+            // On auto-login success: App.svelte's reactive gate swaps us out
+            // for the router, which reads location.hash — so any deep-link the
+            // user was trying to reach before signup is preserved.
+        } catch (err) {
+            const code = apiErrorCode(err);
+            const msg = apiServerMessage(err, "");
+            if (code === "password_mismatch") {
+                error = "Passwords do not match";
+            } else if (code === "user_exists") {
+                // Bootstrap-only signup: the backend's LocalRegistrar rejects
+                // further registrations with 409 once the first user exists. If we
+                // see that, another tab or admin likely completed bootstrap in
+                // parallel — refresh login info so signup affordances disappear
+                // and the user is returned to the login form.
+                error = "Signup is no longer available. Please sign in.";
+                try {
+                    await appStore.loadLoginInfo();
+                } catch {
+                    // keep the friendly message even if the refresh fails
+                }
+                showRegister = false;
+                registerFields = {};
+            } else {
+                error = msg || "Registration failed";
+            }
+        } finally {
+            loading = false;
+        }
+    }
+
+    // OAuth2 login runs in a popup, which is the flow ada's server side was
+    // built for: the callback exchanges the code, sets the session cookie plus
+    // a short-lived non-HttpOnly success cookie, then emits a tiny
+    // window.close() script to close the popup. We watch for either the success
+    // cookie or the popup closing, then refresh identity so App.svelte swaps the
+    // login screen for the app — preserving any location.hash deep-link exactly
+    // like the password flow.
+    //
+    // Why not a full-page redirect: a top-level navigation lands the browser on
+    // the callback's window.close() document, which is a no-op in a normal tab,
+    // stranding the user on a blank page even though login actually succeeded.
+    let oauthLoading = $state(false);
+    let oauthActiveName = $state<string | null>(null);
+    let oauthPoll: ReturnType<typeof setInterval> | null = null;
+
+    // ada's default success cookie name (see auth.go SuccessCookie.withDefaults).
+    // kutu does not override SuccessCookie, so this name is stable.
+    const OAUTH_SUCCESS_COOKIE = "auth_success";
+
+    function readCookie(name: string): string | null {
+        for (const part of document.cookie.split(";")) {
+            const [k, v] = part.split("=").map((s) => s.trim());
+            if (k === name) return v ?? "";
+        }
+        return null;
+    }
+
+    function clearOAuthSuccessCookie() {
+        // ada sets it with Path=/, so we can expire it from JS. Clearing avoids
+        // a stale cookie from a prior login firing a false success next time.
+        document.cookie = `${OAUTH_SUCCESS_COOKIE}=; Max-Age=0; Path=/`;
+    }
+
+    function stopOAuthPoll() {
+        if (oauthPoll !== null) {
+            clearInterval(oauthPoll);
+            oauthPoll = null;
+        }
+    }
+
+    async function finishOAuth(popup: Window | null) {
+        stopOAuthPoll();
+        clearOAuthSuccessCookie();
+        try {
+            popup?.close();
+        } catch {
+            // cross-origin or already-closed window — nothing to do.
+        }
+        await appStore.finishExternalLogin();
+        oauthLoading = false;
+        oauthActiveName = null;
+        // If we're still not authenticated the user cancelled the popup or the
+        // IdP denied the request — stay on the login screen silently (no toast
+        // for a plain cancel).
+    }
+
+    function handleOAuth(strategy: LoginStrategy) {
+        const target = withBasePath(strategy.url);
+
+        // Clear any stale success cookie so we only react to THIS attempt.
+        clearOAuthSuccessCookie();
+
+        const popup = window.open(
+            target,
+            "kutu_oauth_login",
+            "width=520,height=640,menubar=no,toolbar=no,location=yes",
+        );
+        if (!popup) {
+            // Popups blocked (rare for a click): fall back to a full-page
+            // redirect. The callback's window.close() is a no-op here, but auth
+            // still completes and the cookie is set — better than doing nothing.
+            location.href = target;
+            return;
+        }
+
+        error = "";
+        oauthLoading = true;
+        oauthActiveName = strategy.name;
+
+        const startedAt = Date.now();
+        const timeoutMs = 5 * 60 * 1000;
+
+        stopOAuthPoll();
+        oauthPoll = setInterval(() => {
+            // Primary signal: the callback set the success cookie. Fires even
+            // if window.close() is delayed or blocked by the browser.
+            if (readCookie(OAUTH_SUCCESS_COOKIE) !== null) {
+                void finishOAuth(popup);
+                return;
+            }
+            // Fallback signal: the popup closed — either success via the
+            // callback's window.close(), or the user dismissed it. A definitive
+            // identity check in finishOAuth settles which.
+            if (popup.closed) {
+                void finishOAuth(popup);
+                return;
+            }
+            if (Date.now() - startedAt > timeoutMs) {
+                stopOAuthPoll();
+                try {
+                    popup.close();
+                } catch {
+                    // ignore
+                }
+                oauthLoading = false;
+                oauthActiveName = null;
+            }
+        }, 500);
+    }
+
+    // Passkey login: two-step ceremony that hits the same strategy URL
+    // ada exposes for any login (POST /login/pass/<name>). The first call
+    // sends an empty body and gets back { phase:"begin", session_id,
+    // options }. The SPA then runs the WebAuthn ceremony and POSTs back
+    // { session_id, assertion:{...} } — the strategy keys off "assertion"
+    // to dispatch to the finish path.
+    async function handlePasskeyLogin(strategy: LoginStrategy) {
+        if (!passkeySupported) {
+            error = "Your browser does not support passkeys.";
+            return;
+        }
+        // A click on the manual passkey button overrides any in-flight
+        // conditional get(). If we leave the conditional ceremony running
+        // the explicit one will throw "operation already in progress" in
+        // some browsers.
+        conditionalController?.abort();
+        conditionalController = null;
+
+        error = "";
+        loading = true;
+        try {
+            // Step 1: begin. POST empty body; server returns options. The
+            // backend goes discoverable when no user_handle / username hint
+            // is supplied, which is what we want for an explicit click — the
+            // platform UI shows the credential picker.
+            const beginRes = await axios.post<{
+                phase: string;
+                session_id: string;
+                options: ServerRequestOptions;
+            }>(withoutBasePath(strategy.url), {}, { headers: { Accept: "application/json" } });
+
+            const { session_id, options } = beginRes.data;
+
+            // Step 2: browser ceremony.
+            const assertion = await startAuthentication(options);
+            if (!assertion) {
+                // User dismissed the picker without choosing a credential. No
+                // toast — silent is friendlier here.
+                return;
+            }
+
+            // Step 3: finish. Same URL, body now carries the assertion
+            // which makes the strategy dispatch to its finish handler.
+            // On success the strategy mints a session cookie and ada's
+            // auth middleware writes a redirect or success JSON — we just
+            // need the cookie to be set, then refresh the post-login state
+            // the same way loginWith does.
+            await axios.post(
+                withoutBasePath(strategy.url),
+                { session_id, assertion },
+                { headers: { Accept: "application/json" } },
+            );
+
+            // Reuse loginWith's post-login fan-out by calling its tail —
+            // but loginWith does the POST itself. To avoid re-POSTing we
+            // duplicate the post-login refresh logic inline. allSettled
+            // matches the rationale in loginWith.
+            await Promise.allSettled([
+                appStore.loadIdentity(),
+                appStore.loadInfo(),
+            ]);
+        } catch (err: any) {
+            const code = err?.name ?? "";
+            if (code === "NotAllowedError") {
+                // User cancelled. No toast — silent is friendlier here.
+            } else {
+                error = apiErrorMessage(err, "Passkey sign-in failed");
+            }
+        } finally {
+            loading = false;
+        }
+    }
+
+    // Conditional ("autofill") passkey login.
+    //
+    // Conditional mediation is the WebAuthn flow where the browser hangs
+    // the get() promise in the background and offers the enrolled
+    // passkey via the username input's autofill dropdown. Picking one
+    // resolves the promise; typing a password and submitting the form
+    // never resolves it — the AbortController on the form handlers
+    // tears the ceremony down so the next attempt has a fresh one.
+    //
+    // Failure modes are all silent: a busted conditional ceremony must
+    // never block the manual sign-in paths from working, so we swallow
+    // errors here and let the user fall back to typing credentials.
+    async function tryConditionalAuth(strategy: LoginStrategy) {
+        if (!passkeySupported) return;
+        if (!(await isConditionalMediationAvailable())) return;
+        conditionalSupported = true;
+
+        // Tear down any previous attempt (e.g. on hot reload).
+        conditionalController?.abort();
+        conditionalController = new AbortController();
+        const signal = conditionalController.signal;
+
+        try {
+            const beginRes = await axios.post<{
+                phase: string;
+                session_id: string;
+                options: ServerRequestOptions;
+            }>(withoutBasePath(strategy.url), {}, { headers: { Accept: "application/json" } });
+            if (signal.aborted) return;
+
+            const { session_id, options } = beginRes.data;
+            const assertion = await startAuthentication(options, {
+                mediation: "conditional",
+                signal,
+            });
+            if (!assertion || signal.aborted) return; // user picked something else or aborted
+
+            await axios.post(
+                withoutBasePath(strategy.url),
+                { session_id, assertion },
+                { headers: { Accept: "application/json" } },
+            );
+            await Promise.allSettled([
+                appStore.loadIdentity(),
+                appStore.loadInfo(),
+            ]);
+        } catch {
+            // Swallowed on purpose: conditional UI is a progressive
+            // enhancement. Any failure here must not pre-empt the manual
+            // sign-in flow that's also live on the page.
+        }
+    }
+</script>
+
+<div
+    data-section="settings"
+    class="flex flex-col items-center justify-start h-full w-full overflow-y-auto bg-slate-100 dark:bg-warm-900 text-slate-800 dark:text-warm-100 p-4 pt-12 sm:pt-20 border-t-[3px] border-[var(--sec-500)]"
+>
+    <div class="w-full max-w-sm">
+        <div class="flex items-center justify-center gap-2.5 mb-6 text-slate-800 dark:text-warm-50">
+            <Boxes size={22} color="#EF233C" />
+            <div class="flex flex-col leading-tight">
+                <span class="text-[20px] font-bold" style="font-stretch: 112%">{loginInfo?.title || "kutu"}</span>
+                {#if loginInfo?.subtitle}
+                    <span class="text-[12px] text-slate-500 dark:text-warm-400">{loginInfo.subtitle}</span>
+                {/if}
+            </div>
+        </div>
+
+        <div class="relative leaf p-6">
+            <div class="flex items-center justify-between gap-2 mb-5 min-h-8">
+                <h1 class="label-caps text-[13px] text-slate-700 dark:text-warm-200">
+                    {#if mfaChallenge}Verify{:else if showRegister && hasRegister}Create admin account{:else}Sign in{/if}
+                </h1>
+                <div class="flex items-center gap-1">
+                    {#if localLoginIsCollapsed}
+                        <button
+                            type="button"
+                            aria-expanded={showCollapsedLocalLogin}
+                            onclick={() => {
+                                showCollapsedLocalLogin = !showCollapsedLocalLogin;
+                                showRegister = false;
+                                error = "";
+                            }}
+                            class="btn btn-ghost btn-sm"
+                        >
+                            <Key size={12} />
+                            Local login
+                            {#if showCollapsedLocalLogin}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}
+                        </button>
+                    {/if}
+                    <ThemeSwitcher />
+                </div>
+            </div>
+
+            {#if infoLoading}
+                <p class="text-[13px] text-slate-500 dark:text-warm-400 py-4 text-center" aria-busy="true">Loading sign-in options…</p>
+            {:else if infoError}
+                <div class="errbox" role="alert">{infoError}</div>
+            {:else if mfaChallenge}
+                <form
+                    onsubmit={(e) => {
+                        e.preventDefault();
+                        handleMFASubmit();
+                    }}
+                    class="space-y-4"
+                >
+                    <div class="flex gap-3">
+                        <ShieldCheck size={20} class="shrink-0 mt-0.5 text-accent-600 dark:text-accent-400" />
+                        <div>
+                            <h2 class="text-[14px] font-semibold">Two-factor authentication</h2>
+                            <p class="mt-1 text-[13px] text-slate-600 dark:text-warm-300">
+                                Enter the 6-digit code from your authenticator app, or one of your recovery codes if you lost the device.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <label for="mfa-code" class="field-label">Code</label>
+                        <!-- svelte-ignore a11y_autofocus -->
+                        <input
+                            id="mfa-code"
+                            type="text"
+                            inputmode="text"
+                            autocomplete="one-time-code"
+                            autocapitalize="off"
+                            spellcheck="false"
+                            autofocus
+                            bind:value={mfaCode}
+                            placeholder="123456 or xxxx-xxxx-xxxx"
+                            required
+                            class="input !h-10 text-center font-mono !text-[16px] tracking-widest"
+                        />
+                    </div>
+
+                    {#if error}<div class="errbox" role="alert">{error}</div>{/if}
+
+                    <button type="submit" disabled={loading} class="btn btn-primary w-full !h-10">
+                        <LogIn size={14} />
+                        {loading ? "Verifying…" : "Verify and sign in"}
+                    </button>
+                    <button type="button" onclick={cancelMFA} class="btn btn-ghost w-full">
+                        <ArrowLeft size={13} />
+                        Back to sign in
+                    </button>
+                </form>
+            {:else}
+                {#if passwordStrategy}
+                    {#if showRegister && hasRegister && passwordStrategy.register}
+                        <p class="mb-4 text-[13px] text-slate-600 dark:text-warm-300">
+                            No users exist yet. The account you create now becomes the first administrator.
+                        </p>
+                        <form
+                            onsubmit={(e) => {
+                                e.preventDefault();
+                                handleRegister(passwordStrategy!);
+                            }}
+                            class="space-y-4"
+                        >
+                            {#each passwordStrategy.register.fields ?? [] as field}
+                                <div class="field">
+                                    <label for={`reg-${field.name}`} class="field-label">{field.label}</label>
+                                    <input
+                                        id={`reg-${field.name}`}
+                                        type={field.type}
+                                        value={getFieldValue(registerFields, field.name)}
+                                        oninput={(e) => {
+                                            registerFields = setFieldValue(
+                                                registerFields,
+                                                field.name,
+                                                (e.target as HTMLInputElement).value,
+                                            );
+                                        }}
+                                        required={field.required ?? false}
+                                        placeholder={field.placeholder ?? ""}
+                                        autocomplete={field.type === "password" ? "new-password" : field.name}
+                                        class="input !h-9"
+                                    />
+                                </div>
+                            {/each}
+
+                            {#if error}<div class="errbox" role="alert">{error}</div>{/if}
+
+                            <button type="submit" disabled={loading} class="btn btn-primary w-full !h-10">
+                                <UserPlus size={14} />
+                                {loading ? "Creating account…" : "Create account"}
+                            </button>
+                        </form>
+                    {:else}
+                        <form
+                            onsubmit={(e) => {
+                                e.preventDefault();
+                                handleLogin(passwordStrategy!);
+                            }}
+                            class="space-y-4"
+                        >
+                            {#each passwordStrategy.fields ?? [] as field}
+                                <div class="field">
+                                    <label for={`login-${field.name}`} class="field-label">{field.label}</label>
+                                    <input
+                                        id={`login-${field.name}`}
+                                        type={field.type}
+                                        value={getFieldValue(loginFields, field.name)}
+                                        oninput={(e) => {
+                                            loginFields = setFieldValue(
+                                                loginFields,
+                                                field.name,
+                                                (e.target as HTMLInputElement).value,
+                                            );
+                                        }}
+                                        required={field.required ?? false}
+                                        placeholder={field.placeholder ?? ""}
+                                        autocomplete={passkeyAutocomplete(field.name, field.type)}
+                                        class="input !h-9"
+                                    />
+                                </div>
+                            {/each}
+
+                            {#if error}<div class="errbox" role="alert">{error}</div>{/if}
+
+                            <button type="submit" disabled={loading} class="btn btn-primary w-full !h-10">
+                                <LogIn size={14} />
+                                {loading ? "Signing in…" : "Sign in"}
+                            </button>
+                        </form>
+
+                        {#if hasRegister}
+                            <button
+                                type="button"
+                                class="btn btn-ghost w-full mt-3"
+                                onclick={() => {
+                                    showRegister = true;
+                                    error = "";
+                                }}
+                            >
+                                No account yet? Create the first one
+                            </button>
+                        {/if}
+                    {/if}
+                {/if}
+
+                {#if oauthStrategies.length > 0}
+                    {#if passwordStrategy}
+                        <div class="divider"><span class="label-caps">or</span></div>
+                    {/if}
+                    <div class="space-y-2">
+                        {#each oauthStrategies as strategy}
+                            <button
+                                type="button"
+                                onclick={() => handleOAuth(strategy)}
+                                disabled={oauthLoading}
+                                class="btn btn-secondary w-full !h-10"
+                            >
+                                <ExternalLink size={14} />
+                                {oauthLoading && oauthActiveName === strategy.name
+                                    ? "Waiting for sign-in…"
+                                    : strategy.label}
+                            </button>
+                        {/each}
+                    </div>
+                {/if}
+
+                {#if passkeyStrategy}
+                    {#if passwordStrategy || oauthStrategies.length > 0}
+                        <div class="divider"><span class="label-caps">or</span></div>
+                    {/if}
+                    <button
+                        type="button"
+                        onclick={() => handlePasskeyLogin(passkeyStrategy)}
+                        disabled={loading}
+                        class="btn btn-secondary w-full !h-10"
+                    >
+                        <Key size={14} />
+                        {loading ? "Waiting for device…" : passkeyStrategy.label || "Sign in with passkey"}
+                    </button>
+                {/if}
+
+                {#if !passwordStrategy && oauthStrategies.length === 0 && !passkeyStrategy}
+                    <p class="text-[13px] text-slate-500 dark:text-warm-400 py-4 text-center">
+                        No sign-in methods are configured on this server.
+                    </p>
+                {/if}
+            {/if}
+        </div>
+
+        {#if appStore.info?.version}
+            <p class="mt-4 text-center font-mono text-[12px] text-slate-500 dark:text-warm-400">{appStore.info.version}</p>
+        {/if}
+    </div>
+</div>
+
+<style>
+    .errbox {
+        padding: 0.625rem 0.75rem;
+        border-radius: 3px;
+        border: 1px solid var(--color-vermilion-300);
+        background: var(--color-vermilion-50);
+        color: var(--color-vermilion-700);
+        font-size: 13px;
+    }
+
+    :global(.dark) .errbox {
+        border-color: var(--color-vermilion-700);
+        background: color-mix(in oklab, var(--color-vermilion-950) 60%, transparent);
+        color: var(--color-vermilion-300);
+    }
+
+    .divider {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin: 1.25rem 0;
+        font-size: 11px;
+        color: var(--color-slate-500);
+    }
+
+    .divider::before,
+    .divider::after {
+        content: "";
+        flex: 1;
+        height: 1px;
+        background: var(--color-slate-200);
+    }
+
+    :global(.dark) .divider {
+        color: var(--color-warm-400);
+    }
+
+    :global(.dark) .divider::before,
+    :global(.dark) .divider::after {
+        background: var(--color-warm-700);
+    }
+</style>

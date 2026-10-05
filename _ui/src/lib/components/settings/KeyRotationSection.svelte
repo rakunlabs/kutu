@@ -10,6 +10,8 @@
     KeyRound,
   } from "lucide-svelte";
   import { keymgrStore } from "@/lib/store/keymgr.svelte";
+  import { confirmAction } from "@/lib/store/confirm.svelte";
+  import PanelHeader from "./PanelHeader.svelte";
 
   // Server-key management panel. Two modes driven by
   // keymgrStore.status.initialized:
@@ -116,6 +118,14 @@
   }
 
   async function onLockNow() {
+    const sure = await confirmAction({
+      title: "Lock the server now?",
+      message:
+        "The key is cleared from memory. Everyone, including you, sees the unlock screen until someone enters the key again.",
+      confirmLabel: "Lock server",
+      danger: true,
+    });
+    if (!sure) return;
     const ok = await keymgrStore.lock();
     if (ok) {
       addToast(
@@ -127,284 +137,110 @@
   }
 </script>
 
-<div>
-  <div class="mb-4">
-    <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-100">
-      Server encryption key
-    </h2>
-    <p class="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-      Manage the at-rest encryption key that protects sensitive settings (mount
-      credentials, hook secrets, external-resource creds).
-    </p>
-  </div>
-
-  <div class="space-y-4">
-    {#if !initialized}
-      <!-- Initialize panel — only visible when the verifier has
-           never been written. Choosing a key here flips the system
-           into "encryption on" mode permanently; every restart from
-           this point on will require unlock. -->
-      <div
-        class="p-5 bg-white dark:bg-warm-900 border border-slate-200 dark:border-warm-700 rounded-lg shadow-sm"
-      >
-        <h3
-          class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2 flex items-center gap-1.5"
-        >
-          <KeyRound size={14} class="text-accent-600 dark:text-accent-400" /> Enable
-          at-rest encryption
-        </h3>
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">
-          kutu is currently running without at-rest encryption. Choose a master
-          key below to turn it on. After enabling, sensitive settings (mount
-          credentials, hook secrets, external-resource creds) will be encrypted
-          on disk, and every server restart will require this key to bring Pika
-          online.
-        </p>
-
-        <div
-          class="mb-4 p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-md"
-        >
-          <p
-            class="text-xs text-amber-800 dark:text-amber-200 leading-relaxed m-0 flex items-start gap-2"
-          >
-            <AlertTriangle size={13} class="shrink-0 mt-0.5" />
-            <span>
-              Save this key in a password manager <strong>before</strong> clicking
-              Enable. Losing it makes encrypted data unrecoverable — there is no
-              reset.
-            </span>
-          </p>
-        </div>
-
-        <form onsubmit={onInitialize} class="space-y-3">
-          <div>
-            <label
-              for="init-key"
-              class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5"
-            >
-              Master key
-            </label>
-            <div class="relative">
-              <input
-                id="init-key"
-                type={showInit ? "text" : "password"}
-                bind:value={initKey}
-                oninput={clearLocal}
-                autocomplete="new-password"
-                disabled={busy}
-                class="w-full px-3 py-2 pr-9 text-sm border border-slate-200 dark:border-warm-700 rounded-md focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/10 disabled:opacity-50"
-              />
-              <button
-                type="button"
-                onclick={() => (showInit = !showInit)}
-                tabindex="-1"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 dark:text-slate-500 bg-transparent border-none cursor-pointer hover:text-slate-600 dark:hover:text-slate-300"
-                title={showInit ? "Hide" : "Show"}
-                aria-label={showInit ? "Hide key" : "Show key"}
-              >
-                {#if showInit}<EyeOff size={15} />{:else}<Eye size={15} />{/if}
-              </button>
-            </div>
-          </div>
-
-          <div>
-            <label
-              for="init-confirm"
-              class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5"
-            >
-              Confirm master key
-            </label>
-            <input
-              id="init-confirm"
-              type={showInit ? "text" : "password"}
-              bind:value={initConfirm}
-              oninput={clearLocal}
-              autocomplete="new-password"
-              disabled={busy}
-              class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-warm-700 rounded-md focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/10 disabled:opacity-50"
-            />
-          </div>
-
-          {#if localError || keymgrStore.error}
-            <div
-              class="p-2.5 rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300"
-            >
-              {localError || keymgrStore.error}
-            </div>
-          {/if}
-
-          <button
-            type="submit"
-            disabled={busy || !initKey || !initConfirm}
-            class="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-white rounded-md cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed
-              {busy ? 'bg-amber-500' : 'bg-accent-600 hover:bg-accent-700'}"
-          >
-            <KeyRound size={14} />
-            {busy ? "Enabling..." : "Enable encryption"}
-          </button>
-        </form>
-      </div>
-    {:else}
-      <!-- Rotate panel -->
-      <div
-        class="p-5 bg-white dark:bg-warm-900 border border-slate-200 dark:border-warm-700 rounded-lg shadow-sm"
-      >
-        <h3
-          class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2 flex items-center gap-1.5"
-        >
-          <RotateCw size={14} /> Rotate key
-        </h3>
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-          Re-encrypts every at-rest secret with the new key. After rotation, the
-          next server restart will require the new key to unlock.
-        </p>
-
-        <div
-          class="mb-4 p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-md"
-        >
-          <p
-            class="text-xs text-amber-800 dark:text-amber-200 leading-relaxed m-0 flex items-start gap-2"
-          >
-            <AlertTriangle size={13} class="shrink-0 mt-0.5" />
-            <span>
-              Save the new key in your password manager <strong>before</strong> rotating.
-              If a restart happens after rotation and you don't have the new key,
-              the server can't be unlocked.
-            </span>
-          </p>
-        </div>
-
-        <form onsubmit={onRotate} class="space-y-3">
-          <!-- Current -->
-          <div>
-            <label
-              for="rotate-current"
-              class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5"
-            >
-              Current key
-            </label>
-            <div class="relative">
-              <input
-                id="rotate-current"
-                type={showCurrent ? "text" : "password"}
-                bind:value={currentKey}
-                oninput={clearLocal}
-                autocomplete="current-password"
-                disabled={busy}
-                class="w-full px-3 py-2 pr-9 text-sm border border-slate-200 dark:border-warm-700 rounded-md focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/10 disabled:opacity-50"
-              />
-              <button
-                type="button"
-                onclick={() => (showCurrent = !showCurrent)}
-                tabindex="-1"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 dark:text-slate-500 bg-transparent border-none cursor-pointer hover:text-slate-600 dark:hover:text-slate-300"
-                title={showCurrent ? "Hide" : "Show"}
-                aria-label={showCurrent
-                  ? "Hide current key"
-                  : "Show current key"}
-              >
-                {#if showCurrent}<EyeOff size={15} />{:else}<Eye
-                    size={15}
-                  />{/if}
-              </button>
-            </div>
-          </div>
-
-          <!-- New -->
-          <div>
-            <label
-              for="rotate-new"
-              class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5"
-            >
-              New key
-            </label>
-            <div class="relative">
-              <input
-                id="rotate-new"
-                type={showNew ? "text" : "password"}
-                bind:value={newKey}
-                oninput={clearLocal}
-                autocomplete="new-password"
-                disabled={busy}
-                class="w-full px-3 py-2 pr-9 text-sm border border-slate-200 dark:border-warm-700 rounded-md focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/10 disabled:opacity-50"
-              />
-              <button
-                type="button"
-                onclick={() => (showNew = !showNew)}
-                tabindex="-1"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 dark:text-slate-500 bg-transparent border-none cursor-pointer hover:text-slate-600 dark:hover:text-slate-300"
-                title={showNew ? "Hide" : "Show"}
-                aria-label={showNew ? "Hide new key" : "Show new key"}
-              >
-                {#if showNew}<EyeOff size={15} />{:else}<Eye size={15} />{/if}
-              </button>
-            </div>
-          </div>
-
-          <!-- Confirm -->
-          <div>
-            <label
-              for="rotate-confirm"
-              class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5"
-            >
-              Confirm new key
-            </label>
-            <input
-              id="rotate-confirm"
-              type={showNew ? "text" : "password"}
-              bind:value={confirmKey}
-              oninput={clearLocal}
-              autocomplete="new-password"
-              disabled={busy}
-              class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-warm-700 rounded-md focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/10 disabled:opacity-50"
-            />
-          </div>
-
-          {#if localError || keymgrStore.error}
-            <div
-              class="p-2.5 rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300"
-            >
-              {localError || keymgrStore.error}
-            </div>
-          {/if}
-
-          <button
-            type="submit"
-            disabled={busy || !currentKey || !newKey || !confirmKey}
-            class="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-white rounded-md cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed
-            {busy ? 'bg-amber-500' : 'bg-vermilion-500 hover:bg-vermilion-600'}"
-          >
-            <RotateCw size={14} class={busy ? "animate-spin" : ""} />
-            {busy ? "Rotating..." : "Rotate server key"}
-          </button>
-        </form>
-      </div>
-
-      <!-- Lock now panel — explicit "step away" action that forces
-         the next request through the unlock flow without restarting
-         the process. Useful for rehearsals and operator handovers. -->
-      <div
-        class="p-5 bg-white dark:bg-warm-900 border border-slate-200 dark:border-warm-700 rounded-lg shadow-sm"
-      >
-        <h3
-          class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2 flex items-center gap-1.5"
-        >
-          <Lock size={14} /> Lock the server now
-        </h3>
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">
-          Clears the live encryption key from memory. Every other user
-          (including you) will be redirected to the unlock screen until someone
-          enters the key again.
-        </p>
+{#snippet secret(id: string, label: string, value: string, set: (v: string) => void, shown: boolean, toggle: (() => void) | null, autocomplete: "new-password" | "current-password")}
+  <label class="field" for={id}>
+    <span class="field-label">{label}</span>
+    <span class="relative flex">
+      <input
+        {id}
+        type={shown ? "text" : "password"}
+        {value}
+        oninput={(e) => { set(e.currentTarget.value); clearLocal(); }}
+        {autocomplete}
+        disabled={busy}
+        class="input font-mono {toggle ? 'pr-9' : ''}"
+      />
+      {#if toggle}
         <button
           type="button"
-          onclick={onLockNow}
-          disabled={busy}
-          class="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-100 bg-slate-100 dark:bg-warm-800 hover:bg-slate-200 dark:hover:bg-warm-700 rounded-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          onclick={toggle}
+          class="btn btn-ghost btn-sm btn-icon absolute right-0.5 top-1/2 -translate-y-1/2"
+          aria-label={shown ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
         >
-          <Lock size={13} /> Lock server
+          {#if shown}<EyeOff size={14} />{:else}<Eye size={14} />{/if}
+        </button>
+      {/if}
+    </span>
+  </label>
+{/snippet}
+
+{#snippet warning(text: string)}
+  <div class="flex items-start gap-2.5 px-3.5 py-3 rounded-[3px] bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-100 text-[13px] leading-relaxed">
+    <AlertTriangle size={15} class="shrink-0 mt-0.5 text-amber-600 dark:text-amber-300" />
+    <span>{text}</span>
+  </div>
+{/snippet}
+
+{#snippet errorBox()}
+  {#if localError || keymgrStore.error}
+    <p class="text-[13px] text-vermilion-700 dark:text-vermilion-300" role="alert">{localError || keymgrStore.error}</p>
+  {/if}
+{/snippet}
+
+<PanelHeader title="Encryption">
+  The at-rest key seals mount credentials, file-server secrets and other sensitive settings in the database.
+</PanelHeader>
+
+<div class="leaf flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3.5 mb-8">
+  <span class="label-caps text-[11px] text-slate-500 dark:text-warm-400">State</span>
+  {#if status === null}
+    <span class="status status-off">Checking…</span>
+  {:else if !initialized}
+    <span class="status status-off">Not enabled</span>
+    <span class="text-[13px] text-slate-600 dark:text-warm-300">Secrets are stored without at-rest encryption.</span>
+  {:else}
+    <span class="status status-ok">Enabled and unlocked</span>
+    <span class="text-[13px] text-slate-600 dark:text-warm-300">Every restart asks for the key.</span>
+  {/if}
+</div>
+
+{#if !initialized}
+  <section>
+    <PanelHeader title="Enable encryption" level={2}>
+      Choose a master key. From then on, kutu starts locked after every restart until someone enters it.
+    </PanelHeader>
+    <form onsubmit={onInitialize} class="leaf p-5 flex flex-col gap-4 max-w-xl">
+      {@render warning("Store the key in a password manager before you enable. A lost key makes the encrypted data unrecoverable; there is no reset.")}
+      {@render secret("init-key", "Master key", initKey, (v) => (initKey = v), showInit, () => (showInit = !showInit), "new-password")}
+      {@render secret("init-confirm", "Repeat master key", initConfirm, (v) => (initConfirm = v), showInit, null, "new-password")}
+      {@render errorBox()}
+      <div class="flex justify-end">
+        <button type="submit" class="btn btn-primary" disabled={busy || !initKey || !initConfirm}>
+          <KeyRound size={14} /> {busy ? "Enabling…" : "Enable encryption"}
         </button>
       </div>
-    {/if}
+    </form>
+  </section>
+{:else}
+  <div class="flex flex-col gap-10">
+    <section>
+      <PanelHeader title="Rotate key" level={2}>
+        Re-encrypts every stored secret with a new key. The next restart needs the new key.
+      </PanelHeader>
+      <form onsubmit={onRotate} class="leaf p-5 flex flex-col gap-4 max-w-xl">
+        {@render warning("Save the new key before rotating. After a restart, only the new key unlocks the server.")}
+        {@render secret("rotate-current", "Current key", currentKey, (v) => (currentKey = v), showCurrent, () => (showCurrent = !showCurrent), "current-password")}
+        {@render secret("rotate-new", "New key", newKey, (v) => (newKey = v), showNew, () => (showNew = !showNew), "new-password")}
+        {@render secret("rotate-confirm", "Repeat new key", confirmKey, (v) => (confirmKey = v), showNew, null, "new-password")}
+        {@render errorBox()}
+        <div class="flex justify-end">
+          <button type="submit" class="btn btn-primary" disabled={busy || !currentKey || !newKey || !confirmKey}>
+            <RotateCw size={14} class={busy ? "animate-spin" : ""} /> {busy ? "Rotating…" : "Rotate key"}
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <section>
+      <PanelHeader title="Lock now" level={2}>
+        Clears the key from memory without restarting. Useful before handing over or stepping away.
+      </PanelHeader>
+      <div class="leaf p-5 flex flex-wrap items-center justify-between gap-4 max-w-xl">
+        <span class="text-[13px] text-slate-600 dark:text-warm-300">Everyone is sent to the unlock screen.</span>
+        <button type="button" onclick={onLockNow} disabled={busy} class="btn btn-secondary">
+          <Lock size={14} /> Lock server
+        </button>
+      </div>
+    </section>
   </div>
-</div>
+{/if}

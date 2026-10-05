@@ -15,7 +15,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '^/(api|data|raw|login|registries|cdn|healthz)(/|$)': {
+      '^/(api|data|raw|login|logout|registries|cdn|healthz)(/|$)': {
         target: 'http://localhost:8080',
         changeOrigin: true,
         secure: true,

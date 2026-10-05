@@ -1,0 +1,92 @@
+package service
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
+
+// RawSession is the low-level session row, shared across auth adapters.
+type RawSession struct {
+	ID        string
+	UserID    string
+	Username  string
+	Payload   []byte
+	RefreshID string
+	ExpiresAt time.Time
+	CreatedAt time.Time
+}
+
+// NewSessionID returns a fresh opaque session identifier.
+func NewSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// GetRawSession retrieves a session by ID, mapping from the service-layer Session struct.
+func (s *Service) GetRawSession(ctx context.Context, id string) (*RawSession, error) {
+	row, err := s.store.Sessions().Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &RawSession{
+		ID:        row.ID,
+		UserID:    row.UserID,
+		Username:  row.Username,
+		Payload:   row.Payload,
+		RefreshID: row.RefreshID,
+		ExpiresAt: row.ExpiresAt,
+		CreatedAt: row.CreatedAt,
+	}, nil
+}
+
+// PutRawSession creates or replaces a session row. CreatedAt is kept from
+// the first write by the storage upsert.
+func (s *Service) PutRawSession(ctx context.Context, rs *RawSession) error {
+	if rs.CreatedAt.IsZero() {
+		rs.CreatedAt = time.Now()
+	}
+	sess := &Session{
+		ID:        rs.ID,
+		UserID:    rs.UserID,
+		Username:  rs.Username,
+		Payload:   rs.Payload,
+		RefreshID: rs.RefreshID,
+		ExpiresAt: rs.ExpiresAt,
+		CreatedAt: rs.CreatedAt,
+	}
+	return s.store.Sessions().Put(ctx, sess)
+}
+
+// DeleteRawSession removes a session by ID.
+func (s *Service) DeleteRawSession(ctx context.Context, id string) error {
+	return s.store.Sessions().Delete(ctx, id)
+}
+
+// ListRawSessionsByUser returns a user's non-expired sessions, newest first.
+// The rows include the raw session ID and payload, so callers MUST NOT leak
+// them to clients — the auth manager maps these to hashed handles before they
+// reach any API response (the raw ID is the live session cookie value).
+func (s *Service) ListRawSessionsByUser(ctx context.Context, userID string) ([]*RawSession, error) {
+	rows, err := s.store.Sessions().ListByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*RawSession, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &RawSession{
+			ID:        row.ID,
+			UserID:    row.UserID,
+			Username:  row.Username,
+			Payload:   row.Payload,
+			RefreshID: row.RefreshID,
+			ExpiresAt: row.ExpiresAt,
+			CreatedAt: row.CreatedAt,
+		})
+	}
+	return out, nil
+}

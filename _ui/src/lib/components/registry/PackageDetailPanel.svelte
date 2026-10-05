@@ -21,15 +21,17 @@
   // README because most users won't open the tab and tarball
   // extraction is non-trivial work on the server.
 
+  import { confirmAction } from '@/lib/store/confirm.svelte';
   import { onMount } from 'svelte';
   import { Comark } from '@comark/svelte';
   import {
     X, Loader2, Copy, FileText, Layers, Box, Tag, AlertTriangle,
-    FileCode, Globe, Package, Trash2,
+    FileCode, Globe, Package, Trash2, ShieldAlert, ShieldCheck,
   } from 'lucide-svelte';
   import { addToast } from '@/lib/store/toast.svelte';
   import * as registryAPI from '@/lib/store/registry.svelte';
-  import type { PackageDetail, RegistryType, NPMVersionDetail } from './types';
+  import type { PackageDetail, RegistryType, NPMVersionDetail, Vulnerability } from './types';
+  import { protocol, fillSnippet, snippetVars } from './protocols';
   import { formatSize, formatPublishedAt } from '@/lib/format';
 
   type Props = {
@@ -46,7 +48,31 @@
   };
   let { namespace, repoName, repoType, packageName, endpoint, canDelete = false, ondeleted, onclose }: Props = $props();
 
-  type Tab = 'overview' | 'versions' | 'readme' | 'install' | 'layers';
+  type Tab = 'overview' | 'versions' | 'readme' | 'install' | 'layers' | 'security';
+
+  let vulns = $state<Vulnerability[] | null>(null);
+  let vulnsLoading = $state(false);
+  let vulnsError = $state<string | null>(null);
+  let vulnsFor = $state<string | null>(null);
+
+  async function loadVulns(version: string) {
+    if (vulnsFor === version && vulns !== null) return;
+    vulnsFor = version;
+    vulnsLoading = true;
+    vulnsError = null;
+    vulns = null;
+    try {
+      vulns = await registryAPI.getVulnerabilities(repoType, namespace, repoName, packageName, version);
+    } catch (err) {
+      vulnsError = err instanceof registryAPI.RegistryAPIError && err.status === 400
+        ? 'Vulnerability data is not available for this package format.'
+        : String(err);
+    } finally {
+      vulnsLoading = false;
+    }
+  }
+
+  const SECURITY_TYPES: RegistryType[] = ['go', 'npm', 'maven', 'pypi', 'cargo', 'nuget', 'rubygems', 'composer', 'pub', 'swift', 'cran', 'conan'];
   let activeTab = $state<Tab>('overview');
 
   let detail = $state<PackageDetail | null>(null);
@@ -90,6 +116,10 @@
           focusedVersion = detail.pypi.latest_version;
         } else if (detail.cargo?.latest_version) {
           focusedVersion = detail.cargo.latest_version;
+        } else if (detail.generic?.latest_version) {
+          focusedVersion = detail.generic.latest_version;
+        } else if (detail.generic?.versions?.length) {
+          focusedVersion = detail.generic.versions[0].version;
         }
       }
     } catch (err) {
@@ -154,6 +184,9 @@
     if (activeTab === 'install' && detail?.type === 'go' && focusedVersion) {
       loadGoMod(focusedVersion);
     }
+    if (activeTab === 'security' && focusedVersion) {
+      loadVulns(focusedVersion);
+    }
   });
 
   async function copyToClipboard(text: string) {
@@ -168,7 +201,7 @@
   async function deleteFocusedArtifact(ref: string) {
     if (!detail || !canDelete) return;
     const subject = detail.type === 'docker' ? `${detail.name}:${ref}` : `${detail.name}@${ref}`;
-    if (!window.confirm(`Delete ${subject} from ${namespace}/${repoName}?\n\nThis removes the registry artifact reference and cannot be undone.`)) {
+    if (!(await confirmAction({ title: `Delete ${subject}?`, message: `It is removed from ${namespace}/${repoName}. This cannot be undone.`, confirmLabel: 'Delete', danger: true }))) {
       return;
     }
     deletingRef = ref;
@@ -213,7 +246,9 @@
       case 'cargo':
         return `# .cargo/config.toml\n[registries.${repoName}]\nindex = "sparse+${endpoint}/"\n\n# Cargo.toml\n${detail.name} = { version = "${ver || 'VERSION'}", registry = "${repoName}" }`;
     }
-    return '';
+    const p = protocol(detail.type);
+    const vars = { ...snippetVars(endpoint, repoName), name: detail.name, version: ver || 'VERSION' };
+    return fillSnippet(p.install ?? p.setup, vars);
   }
 
   // Determine which tabs apply to this protocol.
@@ -223,6 +258,7 @@
     if (detail.type === 'npm' && detail.npm?.has_readme) base.push('readme');
     if (detail.type === 'helm' && detail.helm?.has_readme) base.push('readme');
     if (detail.type === 'docker') base.push('layers');
+    if (SECURITY_TYPES.includes(detail.type)) base.push('security');
     return base;
   })());
 
@@ -233,6 +269,7 @@
       case 'readme': return 'README';
       case 'install': return 'Install';
       case 'layers': return 'Layers';
+      case 'security': return 'Security';
     }
   }
 
@@ -243,6 +280,7 @@
       case 'readme': return FileText;
       case 'install': return FileCode;
       case 'layers': return Layers;
+      case 'security': return ShieldAlert;
     }
   }
 
@@ -273,15 +311,15 @@
   role="presentation"
 ></div>
 <aside
-  class="fixed right-0 top-0 bottom-0 z-50 w-full max-w-3xl bg-white dark:bg-warm-950 border-l border-warm-200 dark:border-warm-800 shadow-2xl flex flex-col"
+  class="fixed right-0 top-0 bottom-0 z-50 w-full max-w-3xl bg-white dark:bg-warm-950 border-l border-slate-200 dark:border-warm-700 shadow-2xl flex flex-col"
   aria-label="Package detail"
 >
   <!-- Header -->
-  <header class="px-4 py-3 border-b border-warm-200 dark:border-warm-800 flex items-center gap-2">
+  <header class="px-4 py-3 border-b border-slate-200 dark:border-warm-700 flex items-center gap-2">
     <Package size={18} class="text-accent-500" />
     <div class="flex-1 min-w-0">
-      <div class="text-sm font-mono truncate">{packageName}</div>
-      <div class="text-[10px] uppercase text-warm-500">
+      <div class="text-[14px] font-mono truncate">{packageName}</div>
+      <div class="text-[11px] uppercase text-slate-500 dark:text-warm-400">
         {repoType} · {namespace}/{repoName}
       </div>
     </div>
@@ -297,11 +335,11 @@
 
   <!-- Tabs -->
   {#if detail && !loading}
-    <nav class="flex border-b border-warm-200 dark:border-warm-800 bg-warm-50 dark:bg-warm-900">
+    <nav class="flex border-b border-slate-200 dark:border-warm-700 bg-warm-50 dark:bg-warm-900">
       {#each availableTabs as t}
         {@const Icon = tabIcon(t)}
         <button
-          class="px-3 py-2 text-xs flex items-center gap-1.5 border-b-2 transition-colors {activeTab === t ? 'border-accent-500 text-accent-500' : 'border-transparent text-warm-600 dark:text-warm-400 hover:text-warm-900 dark:hover:text-warm-100'}"
+          class="px-3 py-2 text-[13px] flex items-center gap-1.5 border-b-2 {activeTab === t ? 'border-accent-500 text-accent-700 dark:text-accent-300 font-semibold' : 'border-transparent text-slate-600 dark:text-warm-400 hover:text-slate-900 dark:hover:text-warm-100'}"
           onclick={() => activeTab = t}
         >
           <Icon size={12} />
@@ -314,15 +352,15 @@
   <!-- Body -->
   <div class="flex-1 overflow-y-auto">
     {#if loading}
-      <div class="flex items-center justify-center h-32 text-warm-500">
+      <div class="flex items-center justify-center h-32 text-slate-500 dark:text-warm-400">
         <Loader2 size={20} class="animate-spin" />
       </div>
     {:else if loadError}
-      <div class="p-4 text-sm text-red-500 flex items-start gap-2">
+      <div class="p-4 text-[14px] text-vermilion-500 flex items-start gap-2">
         <AlertTriangle size={16} class="mt-0.5 shrink-0" />
         <div>
           <div class="font-semibold">Failed to load package detail</div>
-          <div class="text-xs mt-1 font-mono">{loadError}</div>
+          <div class="text-[13px] mt-1 font-mono">{loadError}</div>
         </div>
       </div>
     {:else if detail}
@@ -332,145 +370,180 @@
           {#if detail.type === 'npm' && detail.npm}
             {@const n = detail.npm}
             {#if n.description}
-              <p class="text-sm text-warm-700 dark:text-warm-300">{n.description}</p>
+              <p class="text-[14px] text-warm-700 dark:text-warm-300">{n.description}</p>
             {/if}
-            <dl class="grid grid-cols-2 gap-3 text-xs">
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
               {#if n.latest_version}
                 <div>
-                  <dt class="text-warm-500 uppercase text-[10px]">Latest</dt>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
                   <dd class="font-mono">{n.latest_version}</dd>
                 </div>
               {/if}
               {#if n.license}
                 <div>
-                  <dt class="text-warm-500 uppercase text-[10px]">License</dt>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">License</dt>
                   <dd class="font-mono">{n.license}</dd>
                 </div>
               {/if}
               {#if n.homepage}
                 <div class="col-span-2">
-                  <dt class="text-warm-500 uppercase text-[10px]">Homepage</dt>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Homepage</dt>
                   <dd><a href={n.homepage} class="font-mono text-accent-500 hover:underline" target="_blank" rel="noopener">{n.homepage}</a></dd>
                 </div>
               {/if}
               {#if n.repository?.url}
                 <div class="col-span-2">
-                  <dt class="text-warm-500 uppercase text-[10px]">Repository</dt>
-                  <dd class="font-mono text-xs break-all">{n.repository.url}</dd>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Repository</dt>
+                  <dd class="font-mono text-[13px] break-all">{n.repository.url}</dd>
                 </div>
               {/if}
               {#if n.bugs?.url}
                 <div class="col-span-2">
-                  <dt class="text-warm-500 uppercase text-[10px]">Bugs</dt>
-                  <dd class="font-mono text-xs break-all">{n.bugs.url}</dd>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Bugs</dt>
+                  <dd class="font-mono text-[13px] break-all">{n.bugs.url}</dd>
                 </div>
               {/if}
             </dl>
             {#if n.keywords?.length}
               <div>
-                <div class="text-warm-500 uppercase text-[10px] mb-1">Keywords</div>
+                <div class="text-slate-500 dark:text-warm-400 uppercase text-[11px] mb-1">Keywords</div>
                 <div class="flex flex-wrap gap-1">
                   {#each n.keywords as kw}
-                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-warm-100 dark:bg-warm-800 font-mono">{kw}</span>
+                    <span class="text-[11px] px-1.5 py-0.5 rounded bg-warm-100 dark:bg-warm-800 font-mono">{kw}</span>
                   {/each}
                 </div>
               </div>
             {/if}
             {#if n.dist_tags && Object.keys(n.dist_tags).length > 0}
               <div>
-                <div class="text-warm-500 uppercase text-[10px] mb-1">Dist-tags</div>
+                <div class="text-slate-500 dark:text-warm-400 uppercase text-[11px] mb-1">Dist-tags</div>
                 <div class="space-y-0.5">
                   {#each Object.entries(n.dist_tags) as [tag, ver]}
-                    <div class="text-xs font-mono">{tag}: <span class="text-accent-500">{ver}</span></div>
+                    <div class="text-[13px] font-mono">{tag}: <span class="text-accent-500">{ver}</span></div>
                   {/each}
                 </div>
               </div>
             {/if}
           {:else if detail.type === 'go' && detail.go}
-            <dl class="grid grid-cols-2 gap-3 text-xs">
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Latest</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
                 <dd class="font-mono">{detail.go.latest_version}</dd>
               </div>
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Versions</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Versions</dt>
                 <dd class="font-mono">{detail.go.versions?.length ?? 0}</dd>
               </div>
             </dl>
           {:else if detail.type === 'docker' && detail.docker}
-            <dl class="text-xs">
+            <dl class="text-[13px]">
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Tags</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Tags</dt>
                 <dd class="font-mono">{detail.docker.tags?.length ?? 0}</dd>
               </div>
             </dl>
           {:else if detail.type === 'helm' && detail.helm}
             {@const h = detail.helm}
             {#if h.description}
-              <p class="text-sm text-warm-700 dark:text-warm-300">{h.description}</p>
+              <p class="text-[14px] text-warm-700 dark:text-warm-300">{h.description}</p>
             {/if}
-            <dl class="grid grid-cols-2 gap-3 text-xs">
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
               {#if h.latest_version}
                 <div>
-                  <dt class="text-warm-500 uppercase text-[10px]">Latest</dt>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
                   <dd class="font-mono">{h.latest_version}</dd>
                 </div>
               {/if}
               {#if h.app_version}
                 <div>
-                  <dt class="text-warm-500 uppercase text-[10px]">App version</dt>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">App version</dt>
                   <dd class="font-mono">{h.app_version}</dd>
                 </div>
               {/if}
             </dl>
             {#if h.keywords?.length}
               <div>
-                <div class="text-warm-500 uppercase text-[10px] mb-1">Keywords</div>
+                <div class="text-slate-500 dark:text-warm-400 uppercase text-[11px] mb-1">Keywords</div>
                 <div class="flex flex-wrap gap-1">
                   {#each h.keywords as kw}
-                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-warm-100 dark:bg-warm-800 font-mono">{kw}</span>
+                    <span class="text-[11px] px-1.5 py-0.5 rounded bg-warm-100 dark:bg-warm-800 font-mono">{kw}</span>
                   {/each}
                 </div>
               </div>
             {/if}
           {:else if detail.type === 'maven' && detail.maven}
-            <dl class="grid grid-cols-2 gap-3 text-xs">
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Group</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Group</dt>
                 <dd class="font-mono">{detail.maven.group_id}</dd>
               </div>
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Artifact</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Artifact</dt>
                 <dd class="font-mono">{detail.maven.artifact_id}</dd>
               </div>
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Latest</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
                 <dd class="font-mono">{detail.maven.latest_version}</dd>
               </div>
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Versions</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Versions</dt>
                 <dd class="font-mono">{detail.maven.versions?.length ?? 0}</dd>
               </div>
             </dl>
           {:else if detail.type === 'pypi' && detail.pypi}
-            <dl class="grid grid-cols-2 gap-3 text-xs">
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Latest</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
                 <dd class="font-mono">{detail.pypi.latest_version}</dd>
               </div>
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Versions</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Versions</dt>
                 <dd class="font-mono">{detail.pypi.versions?.length ?? 0}</dd>
               </div>
             </dl>
-          {:else if detail.type === 'cargo' && detail.cargo}
-            <dl class="grid grid-cols-2 gap-3 text-xs">
+          {:else if detail.generic}
+            {@const g = detail.generic}
+            {#if g.description}
+              <p class="text-[14px] text-warm-700 dark:text-warm-300">{g.description}</p>
+            {/if}
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
+              {#if g.latest_version}
+                <div>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
+                  <dd class="font-mono">{g.latest_version}</dd>
+                </div>
+              {/if}
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Latest</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Versions</dt>
+                <dd class="font-mono">{g.versions?.length ?? 0}</dd>
+              </div>
+              {#if g.license}
+                <div>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">License</dt>
+                  <dd class="font-mono">{g.license}</dd>
+                </div>
+              {/if}
+              {#if g.homepage}
+                <div class="col-span-2">
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Homepage</dt>
+                  <dd><a href={g.homepage} class="font-mono text-accent-500 hover:underline break-all" target="_blank" rel="noopener">{g.homepage}</a></dd>
+                </div>
+              {/if}
+              {#each Object.entries(g.metadata ?? {}) as [k, v]}
+                <div class={v.length > 40 ? 'col-span-2' : ''}>
+                  <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">{k}</dt>
+                  <dd class="font-mono break-all">{v}</dd>
+                </div>
+              {/each}
+            </dl>
+          {:else if detail.type === 'cargo' && detail.cargo}
+            <dl class="grid grid-cols-2 gap-3 text-[13px]">
+              <div>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Latest</dt>
                 <dd class="font-mono">{detail.cargo.latest_version}</dd>
               </div>
               <div>
-                <dt class="text-warm-500 uppercase text-[10px]">Versions</dt>
+                <dt class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Versions</dt>
                 <dd class="font-mono">{detail.cargo.versions?.length ?? 0}</dd>
               </div>
             </dl>
@@ -480,8 +553,8 @@
         <!-- ── Versions table ── -->
         <div class="p-4">
           {#if detail.type === 'npm' && detail.npm?.versions}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Version</th>
                   <th class="py-1.5 pr-2">Published</th>
@@ -492,25 +565,25 @@
               </thead>
               <tbody>
                 {#each detail.npm.versions as v}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
                     <td class="py-1.5 pr-2 font-mono">
                       <button
                         class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}"
                         onclick={() => focusedVersion = v.version}
                       >{v.version}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatPublishedAt(v.published_at)}</td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatSize(v.size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatPublishedAt(v.published_at)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(v.size)}</td>
                     <td class="py-1.5">
                       {#if v.deprecated}
-                        <span class="text-[10px] px-1 py-0.5 rounded bg-red-500/10 text-red-500 line-through" title={v.deprecated}>
+                        <span class="text-[11px] px-1 py-0.5 rounded bg-vermilion-500/10 text-vermilion-500 line-through" title={v.deprecated}>
                           deprecated
                         </span>
                       {/if}
                     </td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
                           {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -520,8 +593,8 @@
               </tbody>
             </table>
           {:else if detail.type === 'go' && detail.go?.versions}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Version</th>
                   <th class="py-1.5 pr-2">Published</th>
@@ -533,26 +606,26 @@
               </thead>
               <tbody>
                 {#each detail.go.versions as v}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
-                    <td class="py-1.5 pr-2 font-mono {v.retracted ? 'line-through text-warm-500' : ''}">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
+                    <td class="py-1.5 pr-2 font-mono {v.retracted ? 'line-through text-slate-500 dark:text-warm-400' : ''}">
                       <button
                         class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}"
                         onclick={() => focusedVersion = v.version}
                       >{v.version}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatPublishedAt(v.published_at)}</td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatSize(v.gomod_size)}</td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatSize(v.zip_size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatPublishedAt(v.published_at)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(v.gomod_size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(v.zip_size)}</td>
                     <td class="py-1.5">
                       {#if v.retracted}
-                        <span class="text-[10px] px-1 py-0.5 rounded bg-red-500/10 text-red-500" title={v.retraction_rationale || 'retracted'}>
+                        <span class="text-[11px] px-1 py-0.5 rounded bg-vermilion-500/10 text-vermilion-500" title={v.retraction_rationale || 'retracted'}>
                           retracted
                         </span>
                       {/if}
                     </td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
                           {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -562,8 +635,8 @@
               </tbody>
             </table>
           {:else if detail.type === 'docker' && detail.docker?.tags}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Tag</th>
                   <th class="py-1.5 pr-2">Image size</th>
@@ -574,19 +647,19 @@
               </thead>
               <tbody>
                 {#each detail.docker.tags as t}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
                     <td class="py-1.5 pr-2 font-mono">
                       <button
                         class="hover:text-accent-500 {focusedVersion === t.tag ? 'text-accent-500' : ''}"
                         onclick={() => focusedVersion = t.tag}
                       >{t.tag}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatSize(t.image_size)}</td>
-                    <td class="py-1.5 pr-2 text-warm-500">{t.layers?.length ?? 0}</td>
-                    <td class="py-1.5 font-mono text-[10px] text-warm-500 truncate max-w-xs">{t.digest ?? ''}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(t.image_size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{t.layers?.length ?? 0}</td>
+                    <td class="py-1.5 font-mono text-[11px] text-slate-500 dark:text-warm-400 truncate max-w-xs">{t.digest ?? ''}</td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete tag" aria-label="Delete tag" disabled={deletingRef === t.tag} onclick={() => deleteFocusedArtifact(t.tag)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete tag" aria-label="Delete tag" disabled={deletingRef === t.tag} onclick={() => deleteFocusedArtifact(t.tag)}>
                           {#if deletingRef === t.tag}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -596,8 +669,8 @@
               </tbody>
             </table>
           {:else if detail.type === 'helm' && detail.helm?.versions}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Version</th>
                   <th class="py-1.5 pr-2">App version</th>
@@ -608,19 +681,19 @@
               </thead>
               <tbody>
                 {#each detail.helm.versions as v}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
                     <td class="py-1.5 pr-2 font-mono">
                       <button
                         class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}"
                         onclick={() => focusedVersion = v.version}
                       >{v.version}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{v.app_version ?? ''}</td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatPublishedAt(v.created)}</td>
-                    <td class="py-1.5 text-warm-500">{formatSize(v.size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{v.app_version ?? ''}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatPublishedAt(v.created)}</td>
+                    <td class="py-1.5 text-slate-500 dark:text-warm-400">{formatSize(v.size)}</td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
                           {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -630,8 +703,8 @@
               </tbody>
             </table>
           {:else if detail.type === 'maven' && detail.maven?.versions}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Version</th>
                   <th class="py-1.5 pr-2">JAR</th>
@@ -641,15 +714,15 @@
               </thead>
               <tbody>
                 {#each detail.maven.versions as v}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
                     <td class="py-1.5 pr-2 font-mono">
                       <button class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}" onclick={() => focusedVersion = v.version}>{v.version}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatSize(v.jar_size)}</td>
-                    <td class="py-1.5 text-warm-500">{formatSize(v.pom_size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(v.jar_size)}</td>
+                    <td class="py-1.5 text-slate-500 dark:text-warm-400">{formatSize(v.pom_size)}</td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
                           {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -659,8 +732,8 @@
               </tbody>
             </table>
           {:else if detail.type === 'pypi' && detail.pypi?.versions}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Version</th>
                   <th class="py-1.5 pr-2">Files</th>
@@ -670,15 +743,61 @@
               </thead>
               <tbody>
                 {#each detail.pypi.versions as v}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
                     <td class="py-1.5 pr-2 font-mono">
                       <button class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}" onclick={() => focusedVersion = v.version}>{v.version}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{v.files?.length ?? 0}</td>
-                    <td class="py-1.5 text-warm-500">{formatSize(v.file_size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{v.files?.length ?? 0}</td>
+                    <td class="py-1.5 text-slate-500 dark:text-warm-400">{formatSize(v.file_size)}</td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete version files" aria-label="Delete version files" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version files" aria-label="Delete version files" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                          {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
+                        </button>
+                      </td>
+                    {/if}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {:else if detail.generic?.versions}
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
+                <tr>
+                  <th class="py-1.5 pr-2">Version</th>
+                  <th class="py-1.5 pr-2">Published</th>
+                  <th class="py-1.5 pr-2">Files</th>
+                  <th class="py-1.5 pr-2">Size</th>
+                  <th class="py-1.5">Status</th>
+                  {#if canDelete}<th class="py-1.5 text-right">Actions</th>{/if}
+                </tr>
+              </thead>
+              <tbody>
+                {#each detail.generic.versions as v}
+                  <tr class="border-b border-slate-200 dark:border-warm-700 align-top">
+                    <td class="py-1.5 pr-2 font-mono">
+                      <button class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}" onclick={() => focusedVersion = v.version}>{v.version}</button>
+                    </td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatPublishedAt(v.published_at)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">
+                      {#if v.files?.length}
+                        <details>
+                          <summary class="cursor-pointer">{v.files.length}</summary>
+                          <ul class="font-mono text-[11px] mt-1 space-y-0.5">
+                            {#each v.files as f}
+                              <li class="break-all">{f.name} <span class="text-slate-400">{formatSize(f.size)}</span></li>
+                            {/each}
+                          </ul>
+                        </details>
+                      {:else}—{/if}
+                    </td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(v.size)}</td>
+                    <td class="py-1.5">
+                      {#if v.yanked}<span class="text-[11px] px-1 py-0.5 rounded bg-vermilion-500/10 text-vermilion-500">yanked</span>{/if}
+                    </td>
+                    {#if canDelete}
+                      <td class="py-1.5 text-right">
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
                           {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -688,8 +807,8 @@
               </tbody>
             </table>
           {:else if detail.type === 'cargo' && detail.cargo?.versions}
-            <table class="w-full text-xs">
-              <thead class="text-left text-[10px] uppercase text-warm-500 border-b border-warm-200 dark:border-warm-800">
+            <table class="w-full text-[13px]">
+              <thead class="label-caps text-left text-[11px] text-slate-500 dark:text-warm-400 border-b border-slate-200 dark:border-warm-700">
                 <tr>
                   <th class="py-1.5 pr-2">Version</th>
                   <th class="py-1.5 pr-2">Size</th>
@@ -699,17 +818,17 @@
               </thead>
               <tbody>
                 {#each detail.cargo.versions as v}
-                  <tr class="border-b border-warm-100 dark:border-warm-800/50">
+                  <tr class="border-b border-slate-200 dark:border-warm-700">
                     <td class="py-1.5 pr-2 font-mono">
                       <button class="hover:text-accent-500 {focusedVersion === v.version ? 'text-accent-500' : ''}" onclick={() => focusedVersion = v.version}>{v.version}</button>
                     </td>
-                    <td class="py-1.5 pr-2 text-warm-500">{formatSize(v.size)}</td>
+                    <td class="py-1.5 pr-2 text-slate-500 dark:text-warm-400">{formatSize(v.size)}</td>
                     <td class="py-1.5">
-                      {#if v.yanked}<span class="text-[10px] px-1 py-0.5 rounded bg-red-500/10 text-red-500">yanked</span>{/if}
+                      {#if v.yanked}<span class="text-[11px] px-1 py-0.5 rounded bg-vermilion-500/10 text-vermilion-500">yanked</span>{/if}
                     </td>
                     {#if canDelete}
                       <td class="py-1.5 text-right">
-                        <button class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 disabled:opacity-50" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
+                        <button class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6" title="Delete version" aria-label="Delete version" disabled={deletingRef === v.version} onclick={() => deleteFocusedArtifact(v.version)}>
                           {#if deletingRef === v.version}<Loader2 size={12} class="animate-spin" />{:else}<Trash2 size={12} />{/if}
                         </button>
                       </td>
@@ -720,25 +839,57 @@
             </table>
           {/if}
         </div>
+      {:else if activeTab === 'security'}
+        <div class="p-4 space-y-3">
+          <div class="text-[13px] text-slate-500 dark:text-warm-400">
+            OSV advisories for <span class="font-mono text-warm-900 dark:text-warm-100">{detail.name}@{focusedVersion ?? '—'}</span>.
+            Pick another version on the Versions tab.
+          </div>
+          {#if vulnsLoading}
+            <div class="flex items-center gap-2 text-[13px] text-slate-500"><Loader2 size={14} class="animate-spin" /> Querying osv.dev…</div>
+          {:else if vulnsError}
+            <div class="text-[13px] text-vermilion-500">{vulnsError}</div>
+          {:else if vulns && vulns.length === 0}
+            <div class="flex items-center gap-2 text-[13px] text-green-700 dark:text-green-400"><ShieldCheck size={14} /> No known vulnerabilities.</div>
+          {:else if vulns}
+            <ul class="space-y-2">
+              {#each vulns as v (v.id)}
+                <li class="border border-slate-200 dark:border-warm-700 rounded p-2.5">
+                  <div class="flex items-center gap-2">
+                    <span class="text-[11px] uppercase px-1.5 py-0.5 rounded font-semibold
+                      {v.severity === 'critical' ? 'bg-vermilion-600 text-white'
+                      : v.severity === 'high' ? 'bg-vermilion-500/15 text-vermilion-600 dark:text-vermilion-400'
+                      : v.severity === 'moderate' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                      : 'bg-slate-200 dark:bg-warm-800 text-slate-600 dark:text-warm-300'}">{v.severity}</span>
+                    <a class="font-mono text-[13px] text-accent-600 dark:text-accent-300 hover:underline" href={v.url || `https://osv.dev/vulnerability/${v.id}`} target="_blank" rel="noopener">{v.id}</a>
+                    {#if v.aliases?.length}<span class="text-[11px] text-slate-500 font-mono truncate">{v.aliases.join(', ')}</span>{/if}
+                  </div>
+                  {#if v.summary}<p class="text-[13px] mt-1">{v.summary}</p>{/if}
+                  {#if v.fixed_in?.length}<p class="text-[12px] mt-1 text-slate-500 dark:text-warm-400">Fixed in <span class="font-mono">{v.fixed_in.join(', ')}</span></p>{/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
       {:else if activeTab === 'install'}
         <!-- ── Install snippet + per-version metadata ── -->
         <div class="p-4 space-y-4">
           <div class="flex items-center justify-between">
-            <div class="text-xs text-warm-500">
+            <div class="text-[13px] text-slate-500 dark:text-warm-400">
               Selected version: <span class="font-mono text-warm-900 dark:text-warm-100">{focusedVersion ?? 'none'}</span>
             </div>
           </div>
-          <div class="border border-warm-200 dark:border-warm-800 rounded bg-warm-50 dark:bg-warm-900">
-            <div class="flex items-center justify-between px-3 py-2 border-b border-warm-200 dark:border-warm-800">
-              <span class="text-[10px] uppercase text-warm-500">Install command</span>
+          <div class="border border-slate-200 dark:border-warm-700 rounded bg-warm-50 dark:bg-warm-900">
+            <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 dark:border-warm-700">
+              <span class="text-[11px] uppercase text-slate-500 dark:text-warm-400">Install command</span>
               <button
-                class="text-[10px] px-2 py-0.5 rounded bg-warm-200 dark:bg-warm-800 hover:bg-warm-300 dark:hover:bg-warm-700 flex items-center gap-1"
+                class="text-[11px] px-2 py-0.5 rounded bg-warm-200 dark:bg-warm-800 hover:bg-warm-300 dark:hover:bg-warm-700 flex items-center gap-1"
                 onclick={() => copyToClipboard(installSnippet())}
               >
                 <Copy size={10} /> Copy
               </button>
             </div>
-            <pre class="px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all">{installSnippet()}</pre>
+            <pre class="px-3 py-2 text-[13px] font-mono whitespace-pre-wrap break-all">{installSnippet()}</pre>
           </div>
 
           {#if detail.type === 'npm' && focusedVersion}
@@ -746,52 +897,52 @@
             {#if v}
               {#if v.dependencies && Object.keys(v.dependencies).length > 0}
                 <div>
-                  <div class="text-[10px] uppercase text-warm-500 mb-1">Dependencies</div>
-                  <div class="font-mono text-xs space-y-0.5">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Dependencies</div>
+                  <div class="font-mono text-[13px] space-y-0.5">
                     {#each Object.entries(v.dependencies) as [name, spec]}
-                      <div>{name}: <span class="text-warm-500">{spec}</span></div>
+                      <div>{name}: <span class="text-slate-500 dark:text-warm-400">{spec}</span></div>
                     {/each}
                   </div>
                 </div>
               {/if}
               {#if v.dev_dependencies && Object.keys(v.dev_dependencies).length > 0}
                 <div>
-                  <div class="text-[10px] uppercase text-warm-500 mb-1">Dev dependencies</div>
-                  <div class="font-mono text-xs space-y-0.5">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Dev dependencies</div>
+                  <div class="font-mono text-[13px] space-y-0.5">
                     {#each Object.entries(v.dev_dependencies) as [name, spec]}
-                      <div>{name}: <span class="text-warm-500">{spec}</span></div>
+                      <div>{name}: <span class="text-slate-500 dark:text-warm-400">{spec}</span></div>
                     {/each}
                   </div>
                 </div>
               {/if}
               {#if v.peer_dependencies && Object.keys(v.peer_dependencies).length > 0}
                 <div>
-                  <div class="text-[10px] uppercase text-warm-500 mb-1">Peer dependencies</div>
-                  <div class="font-mono text-xs space-y-0.5">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Peer dependencies</div>
+                  <div class="font-mono text-[13px] space-y-0.5">
                     {#each Object.entries(v.peer_dependencies) as [name, spec]}
-                      <div>{name}: <span class="text-warm-500">{spec}</span></div>
+                      <div>{name}: <span class="text-slate-500 dark:text-warm-400">{spec}</span></div>
                     {/each}
                   </div>
                 </div>
               {/if}
               {#if v.integrity}
                 <div>
-                  <div class="text-[10px] uppercase text-warm-500 mb-1">Integrity</div>
-                  <div class="font-mono text-[10px] break-all text-warm-700 dark:text-warm-300">{v.integrity}</div>
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Integrity</div>
+                  <div class="font-mono text-[11px] break-all text-warm-700 dark:text-warm-300">{v.integrity}</div>
                 </div>
               {/if}
             {/if}
           {:else if detail.type === 'go' && focusedVersion}
-            <div class="border border-warm-200 dark:border-warm-800 rounded bg-warm-50 dark:bg-warm-900">
-              <div class="px-3 py-2 border-b border-warm-200 dark:border-warm-800 text-[10px] uppercase text-warm-500">
+            <div class="border border-slate-200 dark:border-warm-700 rounded bg-warm-50 dark:bg-warm-900">
+              <div class="px-3 py-2 border-b border-slate-200 dark:border-warm-700 text-[11px] uppercase text-slate-500 dark:text-warm-400">
                 go.mod
               </div>
               {#if goModLoading}
-                <div class="px-3 py-4 flex items-center justify-center text-warm-500">
+                <div class="px-3 py-4 flex items-center justify-center text-slate-500 dark:text-warm-400">
                   <Loader2 size={14} class="animate-spin" />
                 </div>
               {:else if goModSource !== null}
-                <pre class="px-3 py-2 text-[11px] font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto">{goModSource}</pre>
+                <pre class="px-3 py-2 text-[12px] font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto">{goModSource}</pre>
               {/if}
             </div>
           {/if}
@@ -800,13 +951,13 @@
         <!-- ── README markdown ── -->
         <div class="p-4">
           {#if readmeLoading}
-            <div class="flex items-center justify-center py-8 text-warm-500">
+            <div class="flex items-center justify-center py-8 text-slate-500 dark:text-warm-400">
               <Loader2 size={20} class="animate-spin" />
             </div>
           {:else if readmeError}
-            <div class="text-sm text-red-500">Failed to load README: {readmeError}</div>
+            <div class="text-[14px] text-vermilion-500">Failed to load README: {readmeError}</div>
           {:else if readme === ''}
-            <div class="text-sm text-warm-500 text-center py-8">No README provided.</div>
+            <div class="text-[14px] text-slate-500 dark:text-warm-400 text-center py-8">No README provided.</div>
           {:else if readme !== null}
             <div class="prose prose-sm dark:prose-invert max-w-none">
               <Comark markdown={readme} />
@@ -817,25 +968,25 @@
         <!-- ── Docker layer breakdown ── -->
         <div class="p-4 space-y-3">
           {#if focusedTag}
-            <div class="text-xs">
-              <span class="text-warm-500">Tag:</span>
+            <div class="text-[13px]">
+              <span class="text-slate-500 dark:text-warm-400">Tag:</span>
               <span class="font-mono">{focusedTag.tag}</span>
               {#if focusedTag.artifact_type}
-                <span class="ml-2 text-[10px] px-1 py-0.5 rounded bg-accent-500/10 text-accent-500">
+                <span class="ml-2 text-[11px] px-1 py-0.5 rounded bg-accent-500/10 text-accent-500">
                   {focusedTag.artifact_type}
                 </span>
               {/if}
             </div>
             {#if focusedTag.config_digest}
-              <div class="text-[10px] text-warm-500">
+              <div class="text-[11px] text-slate-500 dark:text-warm-400">
                 Config: <span class="font-mono">{focusedTag.config_digest}</span>
               </div>
             {/if}
             {#if focusedTag.platforms && focusedTag.platforms.length > 0}
               <div>
-                <div class="text-[10px] uppercase text-warm-500 mb-1">Platforms (multi-arch)</div>
-                <table class="w-full text-[11px]">
-                  <thead class="text-left text-warm-500">
+                <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Platforms (multi-arch)</div>
+                <table class="w-full text-[12px]">
+                  <thead class="text-left text-slate-500 dark:text-warm-400">
                     <tr>
                       <th class="pr-2 py-0.5">OS/Arch</th>
                       <th class="pr-2 py-0.5">Digest</th>
@@ -844,10 +995,10 @@
                   </thead>
                   <tbody>
                     {#each focusedTag.platforms as p}
-                      <tr class="border-t border-warm-100 dark:border-warm-800/50">
+                      <tr class="border-t border-slate-200 dark:border-warm-700">
                         <td class="pr-2 py-1 font-mono">{p.os}/{p.architecture}{p.variant ? '/' + p.variant : ''}</td>
-                        <td class="pr-2 py-1 font-mono text-[10px] text-warm-500 truncate max-w-[200px]">{p.digest}</td>
-                        <td class="py-1 text-warm-500">{formatSize(p.size)}</td>
+                        <td class="pr-2 py-1 font-mono text-[11px] text-slate-500 dark:text-warm-400 truncate max-w-[200px]">{p.digest}</td>
+                        <td class="py-1 text-slate-500 dark:text-warm-400">{formatSize(p.size)}</td>
                       </tr>
                     {/each}
                   </tbody>
@@ -856,9 +1007,9 @@
             {/if}
             {#if focusedTag.layers && focusedTag.layers.length > 0}
               <div>
-                <div class="text-[10px] uppercase text-warm-500 mb-1">Layers</div>
-                <table class="w-full text-[11px]">
-                  <thead class="text-left text-warm-500">
+                <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Layers</div>
+                <table class="w-full text-[12px]">
+                  <thead class="text-left text-slate-500 dark:text-warm-400">
                     <tr>
                       <th class="pr-2 py-0.5">Digest</th>
                       <th class="pr-2 py-0.5">Size</th>
@@ -867,20 +1018,20 @@
                   </thead>
                   <tbody>
                     {#each focusedTag.layers as l}
-                      <tr class="border-t border-warm-100 dark:border-warm-800/50">
-                        <td class="pr-2 py-1 font-mono text-[10px] text-warm-700 dark:text-warm-300 truncate max-w-[260px]">{l.digest}</td>
-                        <td class="pr-2 py-1 text-warm-500">{formatSize(l.size)}</td>
-                        <td class="py-1 font-mono text-[10px] text-warm-500 truncate max-w-[200px]">{l.media_type}</td>
+                      <tr class="border-t border-slate-200 dark:border-warm-700">
+                        <td class="pr-2 py-1 font-mono text-[11px] text-warm-700 dark:text-warm-300 truncate max-w-[260px]">{l.digest}</td>
+                        <td class="pr-2 py-1 text-slate-500 dark:text-warm-400">{formatSize(l.size)}</td>
+                        <td class="py-1 font-mono text-[11px] text-slate-500 dark:text-warm-400 truncate max-w-[200px]">{l.media_type}</td>
                       </tr>
                     {/each}
                   </tbody>
                 </table>
               </div>
             {:else if !focusedTag.platforms?.length}
-              <div class="text-warm-500 text-xs">No layers reported.</div>
+              <div class="text-slate-500 dark:text-warm-400 text-[13px]">No layers reported.</div>
             {/if}
           {:else}
-            <div class="text-warm-500 text-xs">Select a tag in the Versions tab.</div>
+            <div class="text-slate-500 dark:text-warm-400 text-[13px]">Select a tag in the Versions tab.</div>
           {/if}
         </div>
       {/if}

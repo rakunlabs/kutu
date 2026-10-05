@@ -1,17 +1,17 @@
 <script lang="ts">
- // Serve shares section — CRUD for the global share pool. A share maps
- // a name to one or more raw-mount paths ("<mount-prefix>" or
- // "<mount-prefix>/<sub/path>"); server instances then expose all
- // shares or a named subset.
+ // Shares — CRUD for the global share pool. A share maps a name to one
+ // or more raw-mount paths ("<mount-prefix>" or "<mount-prefix>/<sub>");
+ // servers then expose all shares or a named subset.
  //
- // Same card grid + inline editor drawer pattern as the servers
- // section. Renaming or deleting a share also prunes stale references
- // from servers and users in the same PUT so the backend validation
- // never trips over a dangling name.
- import { FolderOpen, Plus, Trash2 } from 'lucide-svelte';
+ // Renaming or deleting a share also prunes stale references from
+ // servers and users in the same PUT so backend validation never trips
+ // over a dangling name.
+ import { Plus, Trash2, Pencil, X } from 'lucide-svelte';
  import type { ServeShare, ServeServerEntry, ServeUser } from '@/lib/types/config';
  import { serveStore } from '@/lib/store/serve.svelte';
  import { rawMountsStore } from '@/lib/store/rawmounts.svelte';
+ import { confirmAction } from '@/lib/store/confirm.svelte';
+ import PanelHeader from './PanelHeader.svelte';
 
  const shares = $derived(serveStore.settings.shares ?? []);
  const mountPrefixes = $derived(rawMountsStore.configs.map(c => c.prefix));
@@ -22,13 +22,12 @@
   const explicit = servers.filter(s => (s.shares ?? []).includes(name));
   const implicit = servers.filter(s => (s.shares ?? []).length === 0);
   const n = explicit.length + implicit.length;
-  if (servers.length === 0 || n === 0) return 'no servers';
-  if (n === servers.length) return 'all servers';
+  if (servers.length === 0 || n === 0) return 'Not served';
+  if (n === servers.length) return 'All servers';
   return `${n} server${n === 1 ? '' : 's'}`;
  }
 
- // editingIndex tracks which share row is open in the drawer. `null`
- // collapses it; -1 opens a fresh draft.
+ // editingIndex: `null` collapsed, -1 new draft, otherwise the row.
  let editingIndex = $state<number | null>(null);
  let draft = $state<ServeShare>(emptyDraft());
  let savingDraft = $state(false);
@@ -43,6 +42,7 @@
  }
 
  function openEdit(i: number) {
+  if (editingIndex === i) { closeEditor(); return; }
   draft = structuredClone($state.snapshot(shares[i])) as ServeShare;
   if (draft.paths.length === 0) draft.paths = [''];
   editingIndex = i;
@@ -60,11 +60,14 @@
   draft.paths = draft.paths.filter((_, idx) => idx !== i);
  }
 
- const draftValid = $derived(
-  draft.name.trim() !== ''
-  && !/[/\\]/.test(draft.name)
-  && draft.paths.some(p => p.trim() !== '')
- );
+ const draftProblem = $derived.by(() => {
+  const n = draft.name.trim();
+  if (!n) return 'Name is required.';
+  if (/[/\\]/.test(n)) return 'Names cannot contain slashes.';
+  if (shares.some((s, i) => i !== editingIndex && s.name === n)) return `"${n}" already exists.`;
+  if (!draft.paths.some(p => p.trim() !== '')) return 'Add at least one mount path.';
+  return null;
+ });
 
  // fullDocSave persists a new shares slice and prunes references to
  // share names that no longer exist from servers and users.
@@ -81,7 +84,9 @@
   return serveStore.save(doc);
  }
 
- async function saveDraft() {
+ async function saveDraft(e?: Event) {
+  e?.preventDefault();
+  if (draftProblem) return;
   savingDraft = true;
   try {
    const entry = structuredClone($state.snapshot(draft)) as ServeShare;
@@ -96,140 +101,101 @@
 
  async function deleteShare(i: number) {
   const sh = shares[i];
-  if (!confirm(`Delete share "${sh.name}"? Servers and users referencing it will lose access to it.`)) return;
+  const ok = await confirmAction({
+   title: `Delete share "${sh.name}"?`,
+   message: 'Servers and users that list it lose access. The files in the raw mount stay where they are.',
+   confirmLabel: 'Delete share',
+   danger: true,
+  });
+  if (!ok) return;
   const next = shares.filter((_, idx) => idx !== i).map(s => structuredClone($state.snapshot(s)) as ServeShare);
   await fullDocSave(next);
   if (editingIndex === i) closeEditor();
  }
-
- const inputCls = 'rounded border border-slate-200 dark:border-warm-700 bg-white dark:bg-warm-900 px-2 py-1 text-xs';
- const labelCls = 'text-xs text-slate-600 dark:text-slate-300 flex flex-col gap-1';
 </script>
 
-<section class="mt-8">
- <div class="flex items-center justify-between mb-3">
-  <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-   <FolderOpen size={15} class="text-accent-600 dark:text-accent-400" /> Shares
-  </h3>
-  <button
-   type="button"
-   class="px-2.5 py-1 text-xs rounded bg-accent-600 text-white font-medium hover:bg-accent-700 inline-flex items-center gap-1.5 cursor-pointer"
-   onclick={openNew}
-  >
-   <Plus size={12} /> New share
-  </button>
+{#snippet editor()}
+ <form class="p-4 pt-3" onsubmit={saveDraft}>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+   <label class="field">
+    <span class="field-label">Name</span>
+    <input type="text" class="input font-mono" bind:value={draft.name} placeholder="releases" />
+    <span class="field-hint">The top-level folder clients see. Over S3 it is the bucket name.</span>
+   </label>
+   <div class="flex flex-col gap-2.5 md:pt-6">
+    <label class="check"><input type="checkbox" bind:checked={draft.read_only} /> Read-only</label>
+    <label class="check"><input type="checkbox" bind:checked={draft.root} /> Mount at <code class="font-mono text-[12px]">/</code> instead of <code class="font-mono text-[12px]">/{draft.name.trim() || 'name'}/</code></label>
+   </div>
+  </div>
+
+  <fieldset class="mt-4 pt-4 border-t border-dashed border-slate-300 dark:border-warm-600">
+   <legend class="field-label">Mount paths</legend>
+   <p class="field-hint mt-1"><code class="font-mono">&lt;mount-prefix&gt;</code> or <code class="font-mono">&lt;mount-prefix&gt;/&lt;sub/path&gt;</code>. Several paths merge into one share.</p>
+   <div class="mt-2 flex flex-col gap-2">
+    {#each draft.paths as _, pi (pi)}
+     <div class="flex items-center gap-2">
+      <input type="text" class="input font-mono" bind:value={draft.paths[pi]} list="serve-mount-prefixes" placeholder="data/releases" aria-label={`Mount path ${pi + 1}`} />
+      <button type="button" class="btn btn-ghost btn-icon shrink-0" disabled={draft.paths.length <= 1} onclick={() => removePath(pi)} aria-label={`Remove mount path ${pi + 1}`} title="Remove path"><X size={14} /></button>
+     </div>
+    {/each}
+    <button type="button" class="btn btn-ghost btn-sm self-start" onclick={addPath}><Plus size={13} /> Add path</button>
+   </div>
+  </fieldset>
+
+  <div class="mt-5 flex flex-wrap items-center justify-end gap-3">
+   {#if draftProblem && draft.name}
+    <span class="mr-auto text-[13px] text-vermilion-700 dark:text-vermilion-300">{draftProblem}</span>
+   {/if}
+   <button type="button" class="btn btn-secondary" onclick={closeEditor}>Cancel</button>
+   <button type="submit" class="btn btn-primary" disabled={savingDraft || serveStore.saving || !!draftProblem}>
+    {savingDraft ? 'Saving…' : editingIndex === -1 ? 'Create share' : 'Save changes'}
+   </button>
+  </div>
+ </form>
+{/snippet}
+
+<section>
+ <PanelHeader title="Shares" level={2}>
+  Named folders built from raw-mount paths.
+  {#snippet actions()}
+   <button type="button" class="btn btn-secondary btn-sm" onclick={openNew} disabled={editingIndex === -1}><Plus size={13} /> Add share</button>
+  {/snippet}
+ </PanelHeader>
+
+ <div class="leaf overflow-hidden">
+  {#if editingIndex === -1}
+   <div class="border-b border-slate-200 dark:border-warm-700 bg-accent-50/50 dark:bg-accent-950/30">
+    <div class="px-4 pt-4 text-[13px] font-semibold text-slate-900 dark:text-warm-50">New share</div>
+    {@render editor()}
+   </div>
+  {/if}
+
+  {#if shares.length === 0 && editingIndex !== -1}
+   <p class="px-6 py-8 text-center text-[13px] text-slate-600 dark:text-warm-300">No shares yet. Servers have nothing to serve until you add one.</p>
+  {:else}
+   <ul class="divide-y divide-slate-200 dark:divide-warm-700">
+    {#each shares as sh, i (sh.name + '\u0000' + i)}
+     {@const open = editingIndex === i}
+     <li class={open ? 'bg-accent-50/50 dark:bg-accent-950/30' : ''}>
+      <div class="flex flex-wrap md:flex-nowrap items-center gap-x-4 gap-y-1.5 px-4 py-3">
+       <button type="button" class="font-mono text-[14px] font-semibold text-left text-slate-900 dark:text-warm-50 hover:text-accent-700 dark:hover:text-accent-300 cursor-pointer md:w-40 truncate" onclick={() => openEdit(i)} aria-expanded={open}>{sh.name}</button>
+       <span class="font-mono text-[13px] text-slate-600 dark:text-warm-300 truncate flex-1 basis-40 min-w-0" title={sh.paths.join(', ')}>{sh.paths.join(', ') || '—'}</span>
+       <span class="flex items-center gap-1.5 md:w-48">
+        <span class="text-[13px] text-slate-600 dark:text-warm-300">{usedBy(sh.name)}</span>
+        {#if sh.read_only}<span class="tag">read-only</span>{/if}
+        {#if sh.root}<span class="tag">root</span>{/if}
+       </span>
+       <span class="flex items-center gap-1 ml-auto">
+        <button type="button" class="btn btn-ghost btn-sm" onclick={() => openEdit(i)} aria-expanded={open} disabled={open}><Pencil size={13} /> Edit</button>
+        <button type="button" class="btn btn-danger-ghost btn-sm btn-icon" onclick={() => deleteShare(i)} aria-label={`Delete share ${sh.name}`} title="Delete share"><Trash2 size={14} /></button>
+       </span>
+      </div>
+      {#if open}{@render editor()}{/if}
+     </li>
+    {/each}
+   </ul>
+  {/if}
  </div>
-
- {#if shares.length === 0 && editingIndex !== -1}
-  <p class="text-xs text-slate-400 dark:text-slate-500 border border-dashed border-slate-200 dark:border-warm-700 rounded-lg p-4 text-center">
-   No shares yet. A share maps a name to one or more raw-mount paths; assign it to specific servers from their editor.
-  </p>
- {:else}
-  <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-   {#each shares as sh, i (sh.name + '\u0000' + i)}
-    <div class="bg-white dark:bg-warm-800 border border-slate-200 dark:border-warm-700 rounded-lg p-4 flex flex-col">
-     <div class="flex items-start gap-2 mb-1">
-      <FolderOpen size={15} class="text-accent-600 dark:text-accent-400 shrink-0 mt-0.5" />
-      <div class="grow min-w-0">
-       <button
-        type="button"
-        class="text-sm font-semibold text-slate-800 dark:text-slate-100 hover:text-accent-600 dark:hover:text-accent-400 truncate text-left cursor-pointer font-mono"
-        onclick={() => openEdit(i)}
-       >
-        {sh.name}
-       </button>
-       <div class="text-xs text-slate-500 dark:text-slate-400 font-mono truncate" title={sh.paths.join(', ')}>
-        {sh.paths.join(', ') || '—'}
-       </div>
-      </div>
-     </div>
-
-     <div class="flex flex-wrap items-center gap-1.5 mt-1 text-[10px]">
-      {#if sh.read_only}
-       <span class="uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 dark:bg-warm-900 dark:text-slate-400">read-only</span>
-      {/if}
-      {#if sh.root}
-       <span class="uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">root mount</span>
-      {/if}
-      <span class="text-slate-400 dark:text-slate-500">{usedBy(sh.name)}</span>
-     </div>
-
-     <div class="mt-auto flex items-center justify-between gap-2 pt-2">
-      <button
-       type="button"
-       class="text-xs text-accent-600 dark:text-accent-400 hover:text-accent-700 dark:hover:text-accent-300 cursor-pointer"
-       onclick={() => openEdit(i)}
-      >Edit</button>
-      <button
-       type="button"
-       class="px-2 py-1 rounded text-xs text-vermilion-700 dark:text-vermilion-300 hover:bg-vermilion-50 dark:hover:bg-vermilion-950/40 inline-flex items-center gap-1 cursor-pointer"
-       title="Delete share"
-       onclick={() => deleteShare(i)}
-      >
-       <Trash2 size={12} />
-      </button>
-     </div>
-    </div>
-   {/each}
-  </div>
- {/if}
-
- {#if editingIndex !== null}
-  <div class="mt-4 bg-white dark:bg-warm-800 border border-slate-200 dark:border-warm-700 rounded-lg p-5">
-   <h4 class="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">
-    {editingIndex === -1 ? 'New share' : `Edit "${shares[editingIndex]?.name}"`}
-   </h4>
-
-   <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-    <label class={labelCls}>
-     Name
-     <input type="text" class={inputCls + ' font-mono'} bind:value={draft.name} placeholder="releases" />
-     <span class="text-[10px] text-slate-400">Clients see this as the top-level folder (S3: the bucket name). No slashes.</span>
-    </label>
-    <div class="flex items-end gap-4 pb-4">
-     <label class="text-xs text-slate-600 dark:text-slate-300 inline-flex items-center gap-2 cursor-pointer"><input type="checkbox" bind:checked={draft.read_only} /> Read-only</label>
-     <label class="text-xs text-slate-600 dark:text-slate-300 inline-flex items-center gap-2 cursor-pointer" title="Mount at / instead of /<name>/"><input type="checkbox" bind:checked={draft.root} /> Root mount</label>
-    </div>
-   </div>
-
-   <div class="mt-1">
-    <div class="text-[11px] text-slate-500 dark:text-slate-400 mb-1">Mount paths — <code class="font-mono">&lt;mount-prefix&gt;</code> or <code class="font-mono">&lt;mount-prefix&gt;/&lt;sub/path&gt;</code></div>
-    <div class="flex flex-col gap-1.5">
-     {#each draft.paths as _, pi (pi)}
-      <div class="flex items-center gap-2">
-       <input type="text" class={inputCls + ' font-mono grow'} bind:value={draft.paths[pi]} list="serve-mount-prefixes" placeholder="data/releases" />
-       <button
-        type="button"
-        class="px-1.5 py-1 rounded text-vermilion-600 dark:text-vermilion-300 hover:bg-vermilion-50 dark:hover:bg-vermilion-950/40 cursor-pointer disabled:opacity-40"
-        title="Remove path"
-        disabled={draft.paths.length <= 1}
-        onclick={() => removePath(pi)}
-       >
-        <Trash2 size={12} />
-       </button>
-      </div>
-     {/each}
-     <button type="button" class="self-start text-xs text-accent-600 dark:text-accent-400 hover:text-accent-700 dark:hover:text-accent-300 inline-flex items-center gap-1 cursor-pointer" onclick={addPath}>
-      <Plus size={11} /> Add path
-     </button>
-    </div>
-   </div>
-
-   <div class="mt-4 flex items-center justify-end gap-2">
-    <button
-     type="button"
-     class="px-3 py-1.5 text-xs rounded bg-slate-100 dark:bg-warm-900 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-warm-700 cursor-pointer"
-     onclick={closeEditor}
-    >Cancel</button>
-    <button
-     type="button"
-     class="px-3 py-1.5 text-xs rounded bg-accent-600 text-white font-medium hover:bg-accent-700 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-     onclick={saveDraft}
-     disabled={savingDraft || serveStore.saving || !draftValid}
-    >{savingDraft ? 'Saving…' : 'Save share'}</button>
-   </div>
-  </div>
- {/if}
 
  <datalist id="serve-mount-prefixes">
   {#each mountPrefixes as pfx (pfx)}<option value={pfx}></option>{/each}

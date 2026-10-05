@@ -1,176 +1,340 @@
+// Package cargo implements a Cargo sparse registry (RFC 2789) plus the
+// registry web API used by `cargo publish/yank/owner/search`:
+//
+//	GET    /config.json                                  sparse index config (auth-required)
+//	GET    /{prefix}/{crate}                             sparse index file (ETag / Last-Modified / 304)
+//	GET    /api/v1/crates?q=&per_page=                   search
+//	PUT    /api/v1/crates/new                            publish (cargo binary body)
+//	GET    /api/v1/crates/{crate}/{version}/download     download .crate
+//	PUT    /api/v1/crates/{crate}/{version}/download     legacy raw .crate upload (index deps empty)
+//	DELETE /api/v1/crates/{crate}/{version}/yank         yank
+//	PUT    /api/v1/crates/{crate}/{version}/unyank       unyank
+//	GET    /api/v1/crates/{crate}/owners                 list owners
+//	PUT    /api/v1/crates/{crate}/owners                 add owners
+//	DELETE /api/v1/crates/{crate}/owners                 remove owners
+//
+// Remote repos proxy an upstream sparse index (e.g. https://index.crates.io)
+// and fetch crates through the upstream config.json `dl` template. Virtual
+// repos merge index files across members.
+//
+// Client configuration (~/.cargo/config.toml):
+//
+//	[registries.kutu]
+//	index = "sparse+https://kutu.example.com/registries/{ns}/{repo}/"
+//	credential-provider = "cargo:token"
+//
+// then `cargo login --registry kutu <kutu token>`.
 package cargo
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/rakunlabs/kutu/internal/hook"
 	"github.com/rakunlabs/kutu/internal/rawfs"
 	"github.com/rakunlabs/kutu/internal/registry"
-	"github.com/rakunlabs/kutu/internal/registry/events"
-	"github.com/rakunlabs/kutu/internal/registry/upstream"
-	"github.com/rakunlabs/kutu/internal/registry/virtualbase"
+	"github.com/rakunlabs/kutu/internal/registry/pkgbase"
 	"github.com/rakunlabs/kutu/internal/service"
 )
 
+const typ = service.RegistryTypeCargo
+
+// ── Store ──
+
+// Store wraps pkgbase.Store with the cargo layout:
+//
+//	index/{prefix}/{name}        sparse index file
+//	crates/{name}/{ver}/{name}-{ver}.crate
+//	meta/{name}/{ver}.json       publish metadata sidecar
+//	meta/{name}/owners.json      owners list
+//	upstream/…                   remote-only upstream config + validators
 type Store struct {
-	fs       rawfs.RawFS
-	basePath string
+	*pkgbase.Store
+	mu *sync.Mutex
 }
 
+// NewStore returns a cargo store rooted at basePath on fs.
 func NewStore(fs rawfs.RawFS, basePath string) *Store {
-	return &Store{fs: fs, basePath: strings.Trim(basePath, "/")}
+	return wrapStore(pkgbase.NewStore(fs, basePath))
 }
 
-func (s *Store) RawFS() rawfs.RawFS { return s.fs }
-
-func (s *Store) join(parts ...string) string {
-	cleaned := make([]string, 0, len(parts)+1)
-	if s.basePath != "" {
-		cleaned = append(cleaned, s.basePath)
-	}
-	for _, p := range parts {
-		p = strings.Trim(p, "/")
-		if p != "" {
-			cleaned = append(cleaned, p)
-		}
-	}
-	return path.Join(cleaned...)
-}
+func wrapStore(s *pkgbase.Store) *Store { return &Store{Store: s, mu: &sync.Mutex{}} }
 
 func norm(name string) string { return strings.ToLower(strings.TrimSpace(name)) }
 
-func indexPath(name string) string {
-	n := norm(name)
-	switch len(n) {
+// prefixOf returns the sparse index directory of name (case preserved).
+func prefixOf(name string) string {
+	switch len(name) {
 	case 0:
 		return ""
 	case 1:
-		return path.Join("1", n)
+		return "1"
 	case 2:
-		return path.Join("2", n)
+		return "2"
 	case 3:
-		return path.Join("3", n[:1], n)
+		return "3/" + name[:1]
 	default:
-		return path.Join(n[:2], n[2:4], n)
+		return name[:2] + "/" + name[2:4]
 	}
 }
 
-func (s *Store) cratePath(name, version string) string {
-	name = norm(name)
-	return s.join("crates", name, version, fmt.Sprintf("%s-%s.crate", name, version))
-}
-
-func (s *Store) indexFilePath(idx string) string { return s.join("index", idx) }
-
-func (s *Store) WriteCrate(name, version string, body []byte) error {
-	wfs, ok := s.fs.(rawfs.WritableRawFS)
-	if !ok {
-		return fmt.Errorf("cargo: backend read-only")
+func indexPath(name string) string {
+	n := norm(name)
+	if n == "" {
+		return ""
 	}
-	if err := wfs.Write(s.cratePath(name, version), bytes.NewReader(body), int64(len(body))); err != nil {
-		return err
+	return prefixOf(n) + "/" + n
+}
+
+// parseIndexPath maps "/se/rd/serde" to "serde".
+func parseIndexPath(p string) (string, bool) {
+	p = strings.ToLower(strings.Trim(p, "/"))
+	i := strings.LastIndex(p, "/")
+	if i < 0 {
+		return "", false
 	}
-	return s.upsertIndex(name, version, body)
+	name := p[i+1:]
+	if !validName(name) || indexPath(name) != p {
+		return "", false
+	}
+	return name, true
 }
 
-func (s *Store) OpenCrate(name, version string) (rawfs.ReadSeekCloser, *rawfs.FileInfo, error) {
-	return s.fs.Open(s.cratePath(name, version))
+func crateRel(name, version string) string {
+	n := norm(name)
+	return path.Join("crates", n, version, n+"-"+version+".crate")
 }
 
-func (s *Store) ReadIndexByName(name string) ([]indexEntry, error) {
-	return s.ReadIndex(indexPath(name))
+func indexRel(idx string) string          { return path.Join("index", idx) }
+func metaRel(name, version string) string { return path.Join("meta", norm(name), version+".json") }
+func ownersRel(name string) string        { return path.Join("meta", norm(name), "owners.json") }
+
+var (
+	nameRe    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+	versionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+)
+
+func validName(n string) bool    { return nameRe.MatchString(n) }
+func validVersion(v string) bool { return versionRe.MatchString(v) }
+
+type indexDep struct {
+	Name            string   `json:"name"`
+	Req             string   `json:"req"`
+	Features        []string `json:"features"`
+	Optional        bool     `json:"optional"`
+	DefaultFeatures bool     `json:"default_features"`
+	Target          *string  `json:"target"`
+	Kind            string   `json:"kind"`
+	Registry        *string  `json:"registry"`
+	Package         *string  `json:"package,omitempty"`
 }
 
+type indexEntry struct {
+	Name        string              `json:"name"`
+	Version     string              `json:"vers"`
+	Deps        []indexDep          `json:"deps"`
+	CKSum       string              `json:"cksum"`
+	Features    map[string][]string `json:"features"`
+	Features2   map[string][]string `json:"features2,omitempty"`
+	Yanked      bool                `json:"yanked"`
+	Links       *string             `json:"links"`
+	V           int                 `json:"v,omitempty"`
+	RustVersion string              `json:"rust_version,omitempty"`
+	PubTime     string              `json:"pubtime,omitempty"`
+}
+
+// versionMeta is the publish-metadata sidecar of one version.
+type versionMeta struct {
+	Name          string    `json:"name"`
+	Version       string    `json:"vers"`
+	Description   string    `json:"description,omitempty"`
+	License       string    `json:"license,omitempty"`
+	LicenseFile   string    `json:"license_file,omitempty"`
+	Homepage      string    `json:"homepage,omitempty"`
+	Documentation string    `json:"documentation,omitempty"`
+	Repository    string    `json:"repository,omitempty"`
+	Keywords      []string  `json:"keywords,omitempty"`
+	Categories    []string  `json:"categories,omitempty"`
+	Authors       []string  `json:"authors,omitempty"`
+	PublishedAt   time.Time `json:"published_at"`
+}
+
+type owner struct {
+	ID    int    `json:"id"`
+	Login string `json:"login"`
+	Name  string `json:"name,omitempty"`
+}
+
+func parseEntries(body []byte) []indexEntry {
+	var out []indexEntry
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var ent indexEntry
+		if json.Unmarshal(line, &ent) == nil && ent.Name != "" && ent.Version != "" {
+			out = append(out, ent)
+		}
+	}
+	return out
+}
+
+func sortEntries(entries []indexEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		return pkgbase.CompareVersions(entries[i].Version, entries[j].Version) < 0
+	})
+}
+
+func encodeEntries(entries []indexEntry) []byte {
+	var b bytes.Buffer
+	for _, ent := range entries {
+		if ent.Deps == nil {
+			ent.Deps = []indexDep{}
+		}
+		if ent.Features == nil {
+			ent.Features = map[string][]string{}
+		}
+		line, _ := pkgbase.MarshalJSON(ent)
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return b.Bytes()
+}
+
+func findEntry(entries []indexEntry, version string) (indexEntry, bool) {
+	for _, e := range entries {
+		if e.Version == version {
+			return e, true
+		}
+	}
+	return indexEntry{}, false
+}
+
+// ReadIndex returns the parsed entries of the index file at idx.
 func (s *Store) ReadIndex(idx string) ([]indexEntry, error) {
-	rc, _, err := s.fs.Open(s.indexFilePath(idx))
+	body, err := s.Read(indexRel(idx))
 	if err != nil {
-		if isNotFound(err) {
+		if pkgbase.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	defer rc.Close()
-	body, err := io.ReadAll(rc)
-	if err != nil {
-		return nil, err
-	}
-	var out []indexEntry
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var ent indexEntry
-		if json.Unmarshal([]byte(line), &ent) == nil && ent.Name != "" {
-			out = append(out, ent)
-		}
-	}
-	return out, nil
+	return parseEntries(body), nil
 }
 
-func (s *Store) WriteIndex(idx string, body []byte) error {
-	wfs, ok := s.fs.(rawfs.WritableRawFS)
-	if !ok {
-		return fmt.Errorf("cargo: backend read-only")
-	}
-	return wfs.Write(s.indexFilePath(idx), bytes.NewReader(body), int64(len(body)))
-}
-
-func (s *Store) upsertIndex(name, version string, body []byte) error {
+// ReadIndexByName returns the parsed entries of crate name.
+func (s *Store) ReadIndexByName(name string) ([]indexEntry, error) {
 	idx := indexPath(name)
-	entries, _ := s.ReadIndex(idx)
-	sum := sha256.Sum256(body)
-	next := indexEntry{Name: norm(name), Version: version, CKSum: hex.EncodeToString(sum[:]), Deps: []any{}, Features: map[string][]string{}, Links: nil}
+	if idx == "" {
+		return nil, nil
+	}
+	return s.ReadIndex(idx)
+}
+
+func (s *Store) writeEntries(name string, entries []indexEntry) error {
+	rel := indexRel(indexPath(name))
+	if len(entries) == 0 {
+		return s.Delete(rel)
+	}
+	sortEntries(entries)
+	return s.Write(rel, encodeEntries(entries))
+}
+
+func (s *Store) hasVersion(name, version string) bool {
+	ents, _ := s.ReadIndexByName(name)
+	_, ok := findEntry(ents, version)
+	return ok
+}
+
+// put stores crate bytes, the optional metadata sidecar and upserts
+// the index entry.
+func (s *Store) put(ent indexEntry, vm *versionMeta, crate []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.Write(crateRel(ent.Name, ent.Version), crate); err != nil {
+		return err
+	}
+	if vm != nil {
+		b, _ := pkgbase.MarshalJSON(vm)
+		if err := s.Write(metaRel(ent.Name, ent.Version), b); err != nil {
+			return err
+		}
+	}
+	entries, err := s.ReadIndexByName(ent.Name)
+	if err != nil {
+		return err
+	}
 	replaced := false
 	for i := range entries {
-		if entries[i].Version == version {
-			entries[i] = next
+		if entries[i].Version == ent.Version {
+			entries[i] = ent
 			replaced = true
-			break
 		}
 	}
 	if !replaced {
-		entries = append(entries, next)
+		entries = append(entries, ent)
 	}
-	return s.writeIndexEntries(idx, entries)
+	return s.writeEntries(ent.Name, entries)
 }
 
-func (s *Store) writeIndexEntries(idx string, entries []indexEntry) error {
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Version < entries[j].Version })
-	var b strings.Builder
-	for _, ent := range entries {
-		line, _ := json.Marshal(ent)
-		b.Write(line)
-		b.WriteByte('\n')
-	}
-	return s.WriteIndex(idx, []byte(b.String()))
+// WriteCrate stores a raw .crate and indexes it with empty deps.
+func (s *Store) WriteCrate(name, version string, body []byte) error {
+	return s.put(rawEntry(name, version, body), &versionMeta{Name: name, Version: version, PublishedAt: time.Now().UTC()}, body)
 }
 
-// DeleteVersion removes a crate archive and its sparse-index row.
+func rawEntry(name, version string, body []byte) indexEntry {
+	return indexEntry{
+		Name: name, Version: version, CKSum: pkgbase.SHA256Hex(body),
+		Deps: []indexDep{}, Features: map[string][]string{},
+		PubTime: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// OpenCrate opens a stored .crate.
+func (s *Store) OpenCrate(name, version string) (rawfs.ReadSeekCloser, *rawfs.FileInfo, error) {
+	return s.Open(crateRel(name, version))
+}
+
+func (s *Store) setYanked(name, version string, yanked bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := s.ReadIndexByName(name)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range entries {
+		if entries[i].Version == version {
+			entries[i].Yanked = yanked
+			found = true
+		}
+	}
+	if !found {
+		return registry.ErrPackageNotFound
+	}
+	return s.writeEntries(name, entries)
+}
+
+// DeleteVersion removes a crate archive, its metadata and its index row.
 func (s *Store) DeleteVersion(name, version string) error {
-	name = norm(name)
+	name = strings.TrimSpace(name)
 	version = strings.TrimSpace(version)
-	idx := indexPath(name)
-	if idx == "" || version == "" {
+	if indexPath(name) == "" || version == "" {
 		return registry.ErrInvalidPackageName
 	}
-	wfs, ok := s.fs.(rawfs.WritableRawFS)
-	if !ok {
-		return fmt.Errorf("cargo: backend read-only")
-	}
-	entries, err := s.ReadIndex(idx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := s.ReadIndexByName(name)
 	if err != nil {
 		return err
 	}
@@ -186,69 +350,67 @@ func (s *Store) DeleteVersion(name, version string) error {
 	if !found {
 		return registry.ErrPackageNotFound
 	}
-
-	var firstErr error
-	if err := wfs.Delete(s.cratePath(name, version)); err != nil && !isNotFound(err) {
-		firstErr = err
-	}
-	if err := s.writeIndexEntries(idx, next); err != nil {
+	if err := s.Delete(crateRel(name, version)); err != nil {
 		return err
 	}
-	return firstErr
+	_ = s.Delete(metaRel(name, version))
+	if len(next) == 0 {
+		_ = s.Delete(ownersRel(name))
+	}
+	return s.writeEntries(name, next)
 }
 
-type indexEntry struct {
-	Name     string              `json:"name"`
-	Version  string              `json:"vers"`
-	Deps     []any               `json:"deps"`
-	CKSum    string              `json:"cksum"`
-	Features map[string][]string `json:"features"`
-	Yanked   bool                `json:"yanked"`
-	Links    *string             `json:"links"`
-}
-
-func (s *Store) ListCrates() ([]string, error) {
-	var out []string
-	var walk func(abs string) error
-	walk = func(abs string) error {
-		entries, err := s.fs.ReadDir(abs)
-		if err != nil {
-			if isNotFound(err) {
-				return nil
-			}
-			return err
-		}
-		for _, e := range entries {
-			child := path.Join(abs, e.Name)
-			if e.IsDir {
-				if err := walk(child); err != nil {
-					return err
-				}
-				continue
-			}
-			rc, _, err := s.fs.Open(child)
-			if err != nil {
-				continue
-			}
-			body, _ := io.ReadAll(rc)
-			rc.Close()
-			for _, line := range strings.Split(string(body), "\n") {
-				var ent indexEntry
-				if json.Unmarshal([]byte(line), &ent) == nil && ent.Name != "" {
-					out = append(out, ent.Name)
-					break
-				}
-			}
-		}
+func (s *Store) readMeta(name, version string) *versionMeta {
+	b, err := s.Read(metaRel(name, version))
+	if err != nil {
 		return nil
 	}
-	if err := walk(s.join("index")); err != nil {
+	var vm versionMeta
+	if json.Unmarshal(b, &vm) != nil {
+		return nil
+	}
+	return &vm
+}
+
+func (s *Store) readOwners(name string) []owner {
+	b, err := s.Read(ownersRel(name))
+	if err != nil {
+		return nil
+	}
+	var out []owner
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func (s *Store) writeOwners(name string, owners []owner) error {
+	for i := range owners {
+		owners[i].ID = i + 1
+	}
+	b, _ := pkgbase.MarshalJSON(owners)
+	return s.Write(ownersRel(name), b)
+}
+
+// ListCrates returns every crate name present in the index (sorted).
+func (s *Store) ListCrates() ([]string, error) {
+	var out []string
+	err := s.Walk("index", func(rel string, _ rawfs.DirEntry) error {
+		body, err := s.Read(rel)
+		if err != nil {
+			return nil
+		}
+		if ents := parseEntries(body); len(ents) > 0 {
+			out = append(out, ents[0].Name)
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	sort.Strings(out)
 	return out, nil
 }
 
+// ListVersions returns the versions of name (ascending).
 func (s *Store) ListVersions(name string) ([]string, error) {
 	entries, err := s.ReadIndexByName(name)
 	if err != nil {
@@ -258,341 +420,98 @@ func (s *Store) ListVersions(name string) ([]string, error) {
 	for _, ent := range entries {
 		out = append(out, ent.Version)
 	}
-	sort.Strings(out)
+	pkgbase.SortVersions(out)
 	return out, nil
 }
 
-func (s *Store) Count() (crates, versions, files int, bytes int64) {
+func (s *Store) listPackages() ([]registry.PackageSummary, error) {
+	names, err := s.ListCrates()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]registry.PackageSummary, 0, len(names))
+	for _, n := range names {
+		vs, _ := s.ListVersions(n)
+		out = append(out, registry.PackageSummary{Name: n, Versions: vs})
+	}
+	return out, nil
+}
+
+type searchCrate struct {
+	Name        string `json:"name"`
+	MaxVersion  string `json:"max_version"`
+	Description string `json:"description"`
+}
+
+type searchResult struct {
+	Crates []searchCrate `json:"crates"`
+	Meta   struct {
+		Total int `json:"total"`
+	} `json:"meta"`
+}
+
+func maxVersion(entries []indexEntry) string {
+	var all, live []string
+	for _, e := range entries {
+		all = append(all, e.Version)
+		if !e.Yanked {
+			live = append(live, e.Version)
+		}
+	}
+	if v := pkgbase.Latest(live); v != "" {
+		return v
+	}
+	return pkgbase.Latest(all)
+}
+
+func (s *Store) search(q string, limit int) searchResult {
+	q = strings.ToLower(strings.TrimSpace(q))
+	var res searchResult
+	res.Crates = []searchCrate{}
 	names, _ := s.ListCrates()
-	crates = len(names)
-	for _, name := range names {
-		ents, _ := s.ReadIndexByName(name)
-		versions += len(ents)
-		for _, ent := range ents {
-			fi, err := s.fs.Stat(s.cratePath(name, ent.Version))
-			if err == nil {
-				files++
-				bytes += fi.Size
+	for _, n := range names {
+		ents, _ := s.ReadIndexByName(n)
+		if len(ents) == 0 {
+			continue
+		}
+		mv := maxVersion(ents)
+		var desc string
+		if vm := s.readMeta(n, mv); vm != nil {
+			desc = vm.Description
+		}
+		if q != "" && !strings.Contains(strings.ToLower(n), q) && !strings.Contains(strings.ToLower(desc), q) {
+			continue
+		}
+		res.Meta.Total++
+		if len(res.Crates) < limit {
+			res.Crates = append(res.Crates, searchCrate{Name: n, MaxVersion: mv, Description: desc})
+		}
+	}
+	return res
+}
+
+func perPage(r *http.Request) int {
+	n := 10
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		var x int
+		for _, c := range v {
+			if c < '0' || c > '9' {
+				x = -1
+				break
+			}
+			x = x*10 + int(c-'0')
+			if x > 1000 {
+				break
 			}
 		}
-	}
-	return
-}
-
-func (s *Store) PurgeAll() (int, int64, []error)     { return s.purge("") }
-func (s *Store) PurgeMutable() (int, int64, []error) { return s.purge("index") }
-
-func (s *Store) purge(prefix string) (int, int64, []error) {
-	wfs, ok := s.fs.(rawfs.WritableRawFS)
-	if !ok {
-		return 0, 0, []error{fmt.Errorf("cargo: backend read-only")}
-	}
-	var count int
-	var bytes int64
-	var errs []error
-	var walk func(abs string)
-	walk = func(abs string) {
-		entries, err := s.fs.ReadDir(abs)
-		if err != nil {
-			if !isNotFound(err) {
-				errs = append(errs, err)
-			}
-			return
-		}
-		for _, e := range entries {
-			child := path.Join(abs, e.Name)
-			if e.IsDir {
-				walk(child)
-				continue
-			}
-			if err := wfs.Delete(child); err != nil && !isNotFound(err) {
-				errs = append(errs, err)
-				continue
-			}
-			count++
-			bytes += e.Size
+		if x > 0 {
+			n = x
 		}
 	}
-	walk(s.join(prefix))
-	return count, bytes, errs
-}
-
-type Local struct {
-	namespace string
-	name      string
-	store     *Store
-	allowPush bool
-	maxUpload int64
-	emitter   events.Emitter
-}
-
-func NewLocalFactory() registry.Factory {
-	return func(_ context.Context, deps registry.Deps, ns string, r *service.RegistryRepository) (registry.Registry, error) {
-		fs, err := deps.MountRawFS(r.Mount)
-		if err != nil {
-			return nil, fmt.Errorf("cargo/local %s/%s: %w", ns, r.Name, err)
-		}
-		return &Local{namespace: ns, name: r.Name, store: NewStore(fs, r.BasePath), allowPush: r.AllowPush, maxUpload: r.MaxUploadSize, emitter: deps.Emitter}, nil
+	if n > 100 {
+		n = 100
 	}
-}
-
-func (l *Local) Namespace() string { return l.namespace }
-func (l *Local) Name() string      { return l.name }
-func (l *Local) Type() string      { return service.RegistryTypeCargo }
-func (l *Local) Kind() string      { return service.RegistryKindLocal }
-func (l *Local) Store() *Store     { return l.store }
-func (l *Local) Close() error      { return nil }
-
-func (l *Local) Stats(context.Context) (registry.Stats, error) {
-	crates, versions, files, bytes := l.store.Count()
-	return registry.Stats{PackageCount: crates, VersionCount: versions, BlobCount: files, TotalBytes: bytes}, nil
-}
-func (l *Local) PackageDetail(_ context.Context, name string) (*registry.PackageDetail, error) {
-	return packageDetail(l.store, name)
-}
-
-func (l *Local) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/config.json":
-		serveConfig(w, r)
-	case (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(r.URL.Path, "/api/v1/crates/"):
-		l.serveDownload(w, r)
-	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/crates/"):
-		l.publishPut(w, r)
-	case r.Method == http.MethodGet || r.Method == http.MethodHead:
-		l.serveIndex(w, r)
-	default:
-		http.Error(w, "no cargo route", http.StatusNotFound)
-	}
-}
-
-func (l *Local) serveIndex(w http.ResponseWriter, r *http.Request) {
-	idx := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-	ents, err := l.store.ReadIndex(idx)
-	if err != nil || len(ents) == 0 {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	rc, fi, err := l.store.fs.Open(l.store.indexFilePath(idx))
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	defer rc.Close()
-	writeFile(w, r, "text/plain; charset=utf-8", rc, fi)
-}
-
-func (l *Local) serveDownload(w http.ResponseWriter, r *http.Request) {
-	name, version, ok := parseDownload(r.URL.Path)
-	if !ok {
-		http.Error(w, "bad cargo download path", http.StatusBadRequest)
-		return
-	}
-	rc, fi, err := l.store.OpenCrate(name, version)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	defer rc.Close()
-	writeFile(w, r, "application/x-tar", rc, fi)
-}
-
-func (l *Local) publishPut(w http.ResponseWriter, r *http.Request) {
-	if !l.allowPush {
-		http.Error(w, "push disabled", http.StatusMethodNotAllowed)
-		return
-	}
-	name, version, ok := parseDownload(r.URL.Path)
-	if !ok {
-		http.Error(w, "expected /api/v1/crates/{crate}/{version}/download", http.StatusBadRequest)
-		return
-	}
-	max := l.maxUpload
-	if max == 0 {
-		max = 512 * 1024 * 1024
-	}
-	body, err := readLimited(r.Body, max)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
-		return
-	}
-	if err := l.store.WriteCrate(name, version, body); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	events.EmitSafe(l.emitter, hook.Event{Type: hook.EventRegistryPublished, Mount: l.namespace, Path: l.name + "/" + norm(name) + "@" + version, Protocol: "registry-cargo", Size: int64(len(body))})
-	w.WriteHeader(http.StatusCreated)
-}
-
-type Remote struct {
-	namespace  string
-	name       string
-	store      *Store
-	client     *upstream.Client
-	mutableTTL time.Duration
-}
-
-func NewRemoteFactory() registry.Factory {
-	return func(_ context.Context, deps registry.Deps, ns string, r *service.RegistryRepository) (registry.Registry, error) {
-		b, err := upstream.BuildRemote(deps, "cargo/remote", ns, r, 5*time.Minute)
-		if err != nil {
-			return nil, err
-		}
-		return &Remote{namespace: ns, name: r.Name, store: NewStore(b.FS, b.BasePath), client: b.Client, mutableTTL: b.MutableTTL}, nil
-	}
-}
-
-func (rr *Remote) Namespace() string { return rr.namespace }
-func (rr *Remote) Name() string      { return rr.name }
-func (rr *Remote) Type() string      { return service.RegistryTypeCargo }
-func (rr *Remote) Kind() string      { return service.RegistryKindRemote }
-func (rr *Remote) Store() *Store     { return rr.store }
-func (rr *Remote) Close() error {
-	if rr.client != nil {
-		return rr.client.Close()
-	}
-	return nil
-}
-func (rr *Remote) Stats(ctx context.Context) (registry.Stats, error) {
-	return (&Local{store: rr.store}).Stats(ctx)
-}
-func (rr *Remote) PackageDetail(_ context.Context, name string) (*registry.PackageDetail, error) {
-	return packageDetail(rr.store, name)
-}
-func (rr *Remote) ProbeUpstream(ctx context.Context) (registry.UpstreamHealth, error) {
-	return upstream.Probe(ctx, rr.client, "/config.json"), nil
-}
-func (rr *Remote) PurgeCache(_ context.Context, opts registry.PurgeOptions) (registry.PurgeStats, error) {
-	count, bytes, errs := rr.store.PurgeMutable()
-	if opts.All {
-		count, bytes, errs = rr.store.PurgeAll()
-	}
-	out := registry.PurgeStats{PurgedFiles: count, PurgedBytes: bytes}
-	for _, err := range errs {
-		out.Errors = append(out.Errors, err.Error())
-	}
-	return out, nil
-}
-
-func (rr *Remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "remote registry is read-only", http.StatusMethodNotAllowed)
-		return
-	}
-	switch {
-	case r.URL.Path == "/config.json":
-		serveConfig(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/v1/crates/"):
-		rr.serveRemoteDownload(w, r)
-	default:
-		rr.serveRemoteIndex(w, r)
-	}
-}
-
-func (rr *Remote) serveRemoteIndex(w http.ResponseWriter, r *http.Request) {
-	idx := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-	if idx == "" {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	if rc, fi, err := rr.store.fs.Open(rr.store.indexFilePath(idx)); err == nil && (rr.mutableTTL <= 0 || time.Since(fi.ModTime) < rr.mutableTTL) {
-		defer rc.Close()
-		writeFile(w, r, "text/plain; charset=utf-8", rc, fi)
-		return
-	}
-	resp, err := rr.client.Get(r.Context(), "/"+idx)
-	if err != nil {
-		if errors.Is(err, upstream.ErrNotFound) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "read upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	_ = rr.store.WriteIndex(idx, body)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(body)
-	}
-}
-
-func (rr *Remote) serveRemoteDownload(w http.ResponseWriter, r *http.Request) {
-	name, version, ok := parseDownload(r.URL.Path)
-	if !ok {
-		http.Error(w, "bad cargo download path", http.StatusBadRequest)
-		return
-	}
-	if rc, fi, err := rr.store.OpenCrate(name, version); err == nil {
-		defer rc.Close()
-		writeFile(w, r, "application/x-tar", rc, fi)
-		return
-	}
-	crateURL := fmt.Sprintf("https://static.crates.io/crates/%s/%s-%s.crate", norm(name), norm(name), version)
-	resp, err := rr.client.Get(r.Context(), crateURL)
-	if err != nil {
-		http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "read upstream: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	_ = rr.store.WriteCrate(name, version, body)
-	w.Header().Set("Content-Type", "application/x-tar")
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(body)
-	}
-}
-
-type Virtual struct{ *virtualbase.Base }
-
-func NewVirtualFactory(resolver virtualbase.Resolver) registry.Factory {
-	return func(_ context.Context, _ registry.Deps, ns string, r *service.RegistryRepository) (registry.Registry, error) {
-		if len(r.Members) == 0 {
-			return nil, fmt.Errorf("cargo/virtual %s/%s: members required", ns, r.Name)
-		}
-		return &Virtual{Base: virtualbase.New(ns, r.Name, r.Members, resolver)}, nil
-	}
-}
-
-func (v *Virtual) Type() string { return service.RegistryTypeCargo }
-func (v *Virtual) PackageDetail(ctx context.Context, name string) (*registry.PackageDetail, error) {
-	return v.DelegatePackageDetail(ctx, name)
-}
-func (v *Virtual) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !v.ServeFirstHit(w, r) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}
-}
-
-func serveConfig(w http.ResponseWriter, r *http.Request) {
-	prefix := strings.TrimRight(r.Header.Get("X-Pika-Registry-Prefix"), "/")
-	body, _ := json.Marshal(map[string]string{
-		"dl":  prefix + "/api/v1/crates/{crate}/{version}/download",
-		"api": prefix,
-	})
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
-}
-
-func parseDownload(p string) (string, string, bool) {
-	parts := strings.Split(strings.TrimPrefix(p, "/api/v1/crates/"), "/")
-	if len(parts) != 3 || parts[2] != "download" || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
+	return n
 }
 
 func packageDetail(s *Store, name string) (*registry.PackageDetail, error) {
@@ -601,45 +520,96 @@ func packageDetail(s *Store, name string) (*registry.PackageDetail, error) {
 		return nil, registry.ErrPackageNotFound
 	}
 	detail := &registry.CargoCrateDetail{}
+	var vs []string
 	for _, ent := range ents {
 		row := registry.CargoVersionDetail{Version: ent.Version, Yanked: ent.Yanked, CKSum: ent.CKSum}
-		if fi, err := s.fs.Stat(s.cratePath(ent.Name, ent.Version)); err == nil {
+		if fi, err := s.Stat(crateRel(ent.Name, ent.Version)); err == nil {
 			row.Size = fi.Size
 		}
 		detail.Versions = append(detail.Versions, row)
+		vs = append(vs, ent.Version)
 	}
-	if len(detail.Versions) > 0 {
-		detail.LatestVersion = detail.Versions[len(detail.Versions)-1].Version
-	}
-	return &registry.PackageDetail{Type: service.RegistryTypeCargo, Name: norm(name), Cargo: detail}, nil
+	detail.LatestVersion = pkgbase.Latest(vs)
+	return &registry.PackageDetail{Type: typ, Name: ents[0].Name, Cargo: detail}, nil
 }
 
-func writeFile(w http.ResponseWriter, r *http.Request, contentType string, rc io.Reader, fi *rawfs.FileInfo) {
-	w.Header().Set("Content-Type", contentType)
-	if fi != nil {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", fi.Size))
-	}
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = io.Copy(w, rc)
-	}
+// ── HTTP helpers ──
+
+func cargoError(w http.ResponseWriter, code int, msg string) {
+	body, _ := pkgbase.MarshalJSON(map[string]any{"errors": []map[string]string{{"detail": msg}}})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
 }
 
-func readLimited(r io.Reader, max int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, max+1))
+func serveConfig(w http.ResponseWriter, r *http.Request) {
+	base := pkgbase.PublicBase(r)
+	pkgbase.WriteJSON(w, r, http.StatusOK, map[string]any{
+		"dl":            base + "/api/v1/crates/{crate}/{version}/download",
+		"api":           base,
+		"auth-required": true,
+	})
+}
+
+// serveIndexBytes writes a sparse index file with ETag/Last-Modified
+// validators; conditional requests get 304.
+func serveIndexBytes(w http.ResponseWriter, r *http.Request, body []byte, mod time.Time) {
+	sum := sha256.Sum256(body)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	http.ServeContent(w, r, "", mod, bytes.NewReader(body))
+}
+
+func serveStoredIndex(w http.ResponseWriter, r *http.Request, s *Store, idx string) {
+	rc, fi, err := s.Open(indexRel(idx))
 	if err != nil {
-		return nil, err
+		pkgbase.NotFound(w)
+		return
 	}
-	if int64(len(body)) > max {
-		return nil, fmt.Errorf("upload too large")
+	body, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		pkgbase.NotFound(w)
+		return
 	}
-	return body, nil
+	var mod time.Time
+	if fi != nil {
+		mod = fi.ModTime
+	}
+	serveIndexBytes(w, r, body, mod)
 }
 
-func isNotFound(err error) bool {
-	if err == nil {
-		return false
+func parseDownload(p string) (string, string, bool) {
+	parts := strings.Split(strings.TrimPrefix(p, "/api/v1/crates/"), "/")
+	if len(parts) != 3 || parts[2] != "download" || !validName(parts[0]) || !validVersion(parts[1]) {
+		return "", "", false
 	}
-	low := strings.ToLower(err.Error())
-	return strings.Contains(low, "not found") || strings.Contains(low, "no such file") || strings.Contains(low, "does not exist")
+	return parts[0], parts[1], true
+}
+
+// apiCrateRoute splits "/api/v1/crates/{crate}/{rest...}".
+func apiCrateRoute(p string) (string, []string, bool) {
+	rest, ok := strings.CutPrefix(p, "/api/v1/crates/")
+	if !ok {
+		return "", nil, false
+	}
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) < 2 || !validName(parts[0]) {
+		return "", nil, false
+	}
+	return parts[0], parts[1:], true
+}
+
+func classify(r *http.Request) (registry.ArtifactRef, bool) {
+	p := r.URL.Path
+	if name, ver, ok := parseDownload(p); ok {
+		return registry.ArtifactRef{Name: norm(name), Version: ver}, true
+	}
+	if strings.HasPrefix(p, "/api/") || p == "/config.json" {
+		return registry.ArtifactRef{}, false
+	}
+	if name, ok := parseIndexPath(p); ok {
+		return registry.ArtifactRef{Name: name}, true
+	}
+	return registry.ArtifactRef{}, false
 }

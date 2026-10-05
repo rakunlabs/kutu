@@ -21,13 +21,13 @@ import (
 // Remote is a pull-through cache of an upstream NPM registry
 // (registry.npmjs.org by default). Read flow:
 //
-//   1. GET /{pkg}: serve cached packument when fresh per MutableTTL.
-//      On stale/miss, fetch from upstream, rewrite tarball URLs to
-//      pika, cache the result, serve.
+//  1. GET /{pkg}: serve cached packument when fresh per MutableTTL.
+//     On stale/miss, fetch from upstream, rewrite tarball URLs to
+//     pika, cache the result, serve.
 //
-//   2. GET /{pkg}/-/{file}.tgz: serve from cache when present (immutable
-//      after first fetch). On miss, fetch from upstream, write to
-//      store, serve.
+//  2. GET /{pkg}/-/{file}.tgz: serve from cache when present (immutable
+//     after first fetch). On miss, fetch from upstream, write to
+//     store, serve.
 //
 // Writes are rejected — operators publish to a Local repo, not a
 // remote mirror.
@@ -35,7 +35,10 @@ type Remote struct {
 	namespace string
 	name      string
 	store     *Store
-	client    *upstream.Client
+	// router selects the upstream client by package name (scope or
+	// name prefix); the default client serves everything else.
+	router *upstream.Router
+	audit  *auditForwarder
 
 	mutableTTL time.Duration
 	sf         *common.Singleflight
@@ -52,7 +55,8 @@ func NewRemoteFactory() registry.Factory {
 			namespace:  ns,
 			name:       r.Name,
 			store:      NewStore(b.FS, b.BasePath),
-			client:     b.Client,
+			router:     upstream.NewRouter(b.Client, normalizeScopePrefixes(b.Upstreams)),
+			audit:      newAuditForwarder(r.URL, r.Auth, deps.Resolver, r.InsecureSkipVerify),
 			mutableTTL: b.MutableTTL,
 			sf:         common.NewSingleflight(),
 		}, nil
@@ -66,8 +70,11 @@ func (rr *Remote) Kind() string      { return service.RegistryKindRemote }
 func (rr *Remote) Store() *Store     { return rr.store }
 
 func (rr *Remote) Close() error {
-	if rr.client != nil {
-		return rr.client.Close()
+	if rr.audit != nil {
+		rr.audit.Close()
+	}
+	if rr.router != nil {
+		return rr.router.Close()
 	}
 	return nil
 }
@@ -86,7 +93,7 @@ func (rr *Remote) PackageDetail(ctx context.Context, name string) (*registry.Pac
 // not implement /-/ping but the probe surfaces that as a non-2xx
 // status code rather than a hard failure.
 func (rr *Remote) ProbeUpstream(ctx context.Context) (registry.UpstreamHealth, error) {
-	return upstream.Probe(ctx, rr.client, "/-/ping"), nil
+	return upstream.Probe(ctx, rr.router.Default(), "/-/ping"), nil
 }
 
 // Stats implements registry.StatsProvider. Reports cached package
@@ -129,6 +136,10 @@ func (rr *Remote) PurgeCache(_ context.Context, opts registry.PurgeOptions) (reg
 // ServeHTTP dispatches.
 func (rr *Remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req := classify(r.Method, r.URL.Path)
+	if req.Op == "audit" {
+		rr.audit.serve(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "remote registries are read-only")
 		return
@@ -168,10 +179,17 @@ func (rr *Remote) servePackument(w http.ResponseWriter, r *http.Request, name st
 	rr.writePackument(w, r, body)
 }
 
-// refetchPackument pulls the packument from upstream, rewrites
-// tarball URLs to pika, persists, and updates dist-tags.
+// refetchPackument pulls the packument from upstream and caches it.
 func (rr *Remote) refetchPackument(r *http.Request, name string) error {
-	resp, err := rr.client.Get(r.Context(), "/"+name)
+	return rr.refetchPackumentCtx(r.Context(), name)
+}
+
+// refetchPackumentCtx pulls the packument from the upstream routed
+// for name, rewrites tarball URLs to root-relative kutu paths (the
+// public base is applied at serve time), persists it, and updates
+// dist-tags.
+func (rr *Remote) refetchPackumentCtx(ctx context.Context, name string) error {
+	resp, err := rr.router.For(name).Get(ctx, "/"+name)
 	if err != nil {
 		return err
 	}
@@ -185,16 +203,11 @@ func (rr *Remote) refetchPackument(r *http.Request, name string) error {
 		return fmt.Errorf("parse upstream packument: %w", err)
 	}
 
-	// Rewrite each version's dist.tarball URL.
-	publicBase := inferPublicBase(r)
 	if versions, ok := pkg["versions"].(map[string]any); ok {
-		for ver, vm := range versions {
-			meta, ok := vm.(map[string]any)
-			if !ok {
-				continue
+		for _, vm := range versions {
+			if meta, ok := vm.(map[string]any); ok {
+				_ = RewriteVersionMetaTarball(meta, name, "")
 			}
-			_ = RewriteVersionMetaTarball(meta, name, publicBase)
-			versions[ver] = meta
 		}
 	}
 	// Persist dist-tags so they survive a packument cache eviction.
@@ -208,7 +221,6 @@ func (rr *Remote) refetchPackument(r *http.Request, name string) error {
 		_ = rr.store.WriteDistTags(name, strTags)
 	}
 
-	// Re-marshal and cache.
 	rewritten, err := json.Marshal(pkg)
 	if err != nil {
 		return err
@@ -235,6 +247,7 @@ func (rr *Remote) packumentFresh(name string) bool {
 
 // writePackument emits the cached body with proper headers.
 func (rr *Remote) writePackument(w http.ResponseWriter, r *http.Request, body []byte) {
+	body = rewritePackumentTarballs(body, inferPublicBase(r))
 	etag := common.EtagFor(string(body))
 	if common.MatchIfNoneMatch(r, etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -268,7 +281,7 @@ func (rr *Remote) serveTarball(w http.ResponseWriter, r *http.Request, name, fil
 // refetchTarball fetches a tarball file and persists it.
 func (rr *Remote) refetchTarball(ctx context.Context, name, file string) error {
 	urlPath := "/" + name + "/-/" + file
-	resp, err := rr.client.Get(ctx, urlPath)
+	resp, err := rr.router.For(name).Get(ctx, urlPath)
 	if err != nil {
 		return err
 	}
@@ -299,35 +312,25 @@ func (rr *Remote) serveDistTags(w http.ResponseWriter, _ *http.Request, name str
 }
 
 // refetchPackumentBackground is a best-effort refresh that bypasses
-// the live request context — used when we want a packument refresh
-// triggered by a side endpoint (e.g. dist-tags first-time query).
-// Tarball URLs in the refreshed packument carry a placeholder
-// public base; that's harmless because dist-tags consumers never
-// follow them.
+// the live request context — used when a side endpoint (e.g. the
+// first dist-tags query) needs the packument.
 func (rr *Remote) refetchPackumentBackground(name string) error {
-	resp, err := rr.client.Get(context.Background(), "/"+name)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	var pkg map[string]any
-	if err := json.Unmarshal(body, &pkg); err != nil {
-		return err
-	}
-	if tags, ok := pkg["dist-tags"].(map[string]any); ok {
-		strTags := make(map[string]string, len(tags))
-		for k, v := range tags {
-			if s, ok := v.(string); ok {
-				strTags[k] = s
-			}
-		}
-		_ = rr.store.WriteDistTags(name, strTags)
-	}
-	return nil
+	_, err, _ := rr.sf.Do("packument:"+name, func() (any, error) {
+		return nil, rr.refetchPackumentCtx(context.Background(), name)
+	})
+	return err
 }
 
-var _ = strings.HasPrefix // kept across optional refactors
+// normalizeScopePrefixes makes a bare scope prefix ("@acme") match
+// the whole scope ("@acme/") without also matching "@acmecorp/…".
+func normalizeScopePrefixes(in []upstream.PrefixClient) []upstream.PrefixClient {
+	out := make([]upstream.PrefixClient, 0, len(in))
+	for _, e := range in {
+		p := strings.TrimPrefix(e.Prefix, "/")
+		if strings.HasPrefix(p, "@") && !strings.Contains(p, "/") {
+			p += "/"
+		}
+		out = append(out, upstream.PrefixClient{Prefix: p, Client: e.Client})
+	}
+	return out
+}

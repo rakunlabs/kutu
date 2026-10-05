@@ -149,6 +149,9 @@ func (b *Base) DelegatePackageDetail(ctx context.Context, name string) (*registr
 func (b *Base) ServeFirstHit(w http.ResponseWriter, r *http.Request) bool {
 	served := false
 	b.ForEachMember(func(reg registry.Registry) bool {
+		if _, _, ok := registry.CheckGate(reg, r); !ok {
+			return false
+		}
 		rec := httptest.NewRecorder()
 		reg.ServeHTTP(rec, r)
 		if rec.Code >= 200 && rec.Code < 300 {
@@ -175,6 +178,9 @@ func (b *Base) CollectListLines(r *http.Request) []string {
 	seen := make(map[string]struct{}, 32)
 	var out []string
 	b.ForEachMember(func(reg registry.Registry) bool {
+		if _, _, ok := registry.CheckGate(reg, r); !ok {
+			return false
+		}
 		rec := httptest.NewRecorder()
 		reg.ServeHTTP(rec, r)
 		if rec.Code != http.StatusOK {

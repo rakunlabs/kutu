@@ -17,6 +17,7 @@
 import axios from 'axios';
 import { addToast } from './toast.svelte';
 import type { RawMount, RawMountConfig } from '@/lib/types/config';
+import { appStore } from './store.svelte';
 
 let mounts = $state<RawMount[]>([]);
 let configs = $state<RawMountConfig[]>([]);
@@ -26,9 +27,12 @@ let loading = $state(false);
 async function load(): Promise<void> {
   loading = true;
   // allSettled so one failing endpoint doesn't blank the other slice.
+  // Full configs carry credentials and need settings.manage.
   const [sumRes, cfgRes] = await Promise.allSettled([
     axios.get<RawMount[]>('/api/v1/raw-mounts'),
-    axios.get<RawMountConfig[]>('/api/v1/raw-mounts/configs'),
+    appStore.hasPermission('settings.manage')
+      ? axios.get<RawMountConfig[]>('/api/v1/raw-mounts/configs')
+      : Promise.resolve({ data: [] as RawMountConfig[] }),
   ]);
   if (sumRes.status === 'fulfilled') mounts = sumRes.value.data ?? [];
   if (cfgRes.status === 'fulfilled') configs = cfgRes.value.data ?? [];

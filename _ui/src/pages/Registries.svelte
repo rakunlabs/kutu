@@ -19,6 +19,7 @@
   //   GET  /api/v1/registries/repos                    → flat list
   //   GET  /api/v1/registries/go/{ns}/{repo}/modules   → modules + versions
 
+  import { confirmAction } from '@/lib/store/confirm.svelte';
   import { onMount } from 'svelte';
   import { link } from 'svelte-spa-router';
   import { appStore } from '@/lib/store/store.svelte';
@@ -28,7 +29,7 @@
   import {
     Loader2,
     Copy, ChevronRight, FolderTree, Trash2, Plus, Pencil, X, RotateCw,
-    Eye, EyeOff, Search, RadioTower,
+    Eye, EyeOff, Search,
     // These four are used directly in the template for per-protocol
     // section headers and empty states; iconFor() / kindIcon() in
     // registry/utils.ts cover the badge-icon callsites.
@@ -39,7 +40,10 @@
   import * as registryAPI from '@/lib/store/registry.svelte';
   import Modal from '@/lib/components/Modal.svelte';
   import PackageDetailPanel from '@/lib/components/registry/PackageDetailPanel.svelte';
-  import RegistryListenersPanel from '@/lib/components/registry/RegistryListenersPanel.svelte';
+  import RepoPolicyEditor from '@/lib/components/registry/RepoPolicyEditor.svelte';
+  import RepoOperations from '@/lib/components/registry/RepoOperations.svelte';
+  import RegistrySearch from '@/lib/components/registry/RegistrySearch.svelte';
+  import { PROTOCOLS, protocol, fillSnippet, snippetVars } from '@/lib/components/registry/protocols';
   import type {
     CargoCrateEntry,
     DockerEntry,
@@ -49,6 +53,7 @@
     ModuleEntry,
     Namespace,
     PackageEntry,
+    PackageSummary,
     ProbeResult,
     PyPIPackageEntry,
     RegistryStats,
@@ -57,6 +62,7 @@
     Repository,
     UpstreamAuth,
   } from '@/lib/components/registry/types';
+  import { LEGACY_TYPES } from '@/lib/components/registry/types';
   import {
     artifactTypeLabel,
     copyToClipboard as copyToClipboardUtil,
@@ -67,7 +73,6 @@
   } from '@/lib/components/registry/utils';
 
   let booted = $state(false);
-  let showListeners = $state(false);
   let settingsLoadRequested = $state(false);
   let namespaces = $state<Namespace[]>([]);
   let selectedNS = $state<string | null>(null);
@@ -79,6 +84,8 @@
   let mavenArtifacts = $state<MavenArtifactEntry[]>([]);
   let pypiPackages = $state<PyPIPackageEntry[]>([]);
   let cargoCrates = $state<CargoCrateEntry[]>([]);
+  let genericEntries = $state<PackageSummary[]>([]);
+  let searchOpen = $state(false);
   let entriesLoading = $state(false);
   // For all three browsers — only one is shown at a time depending
   // on selectedRepo.type, so a single expanded-name key is enough.
@@ -151,6 +158,7 @@
     mavenArtifacts = [];
     pypiPackages = [];
     cargoCrates = [];
+    genericEntries = [];
     entriesLoading = true;
     try {
       // Dispatch on protocol — each API call has a different
@@ -179,6 +187,9 @@
           break;
         case 'cargo':
           cargoCrates = await registryAPI.listCargoCrates(ns, repo.name);
+          break;
+        default:
+          genericEntries = await registryAPI.listEntries(repo.type, ns, repo.name);
           break;
       }
     } catch (err) {
@@ -254,20 +265,19 @@
   // confirm prompt.
   let purgeRunning = $state(false);
   async function runCachePurge(ns: string, repo: Repository) {
-    const wide = window.confirm(
-      `Refresh upstream cache for ${ns}/${repo.name}?\n\n` +
-      `OK = drop mutable pointers (next read re-fetches version lists / floating tags).\n` +
-      `Cancel = abort.\n\n` +
-      `Hold Shift while clicking OK to also drop cached artifacts (forces a full re-download).`
-    );
-    if (!wide) return;
-    // window.confirm doesn't expose modifier state, so we use a
-    // second prompt for the wide scope. Simple but explicit.
-    const all = window.confirm(
-      `Also drop cached artifacts (manifests / tarballs / blobs)?\n\n` +
-      `OK = full purge (heavier, forces re-download on every pull).\n` +
-      `Cancel = mutable-only purge (recommended).`
-    );
+    const scope = await confirmAction({
+      title: `Refresh the upstream cache of ${ns}/${repo.name}?`,
+      message: 'Drops cached version lists and floating tags, so the next read asks the upstream again. Cached artifacts stay.',
+      confirmLabel: 'Refresh cache',
+    });
+    if (!scope) return;
+    const all = await confirmAction({
+      title: 'Also drop cached artifacts?',
+      message: 'Manifests, tarballs and blobs are deleted too and every pull re-downloads them. Most refreshes do not need this.',
+      confirmLabel: 'Drop artifacts too',
+      cancelLabel: 'Keep artifacts',
+      danger: true,
+    });
     purgeRunning = true;
     try {
       const stats = await registryAPI.purgeCache(repo.type, ns, repo.name, all) as {
@@ -296,7 +306,7 @@
   // server-side sweep, surfaces the resulting stats via toast,
   // then reloads the image list so freed-up entries disappear.
   //
-  // Pika never runs GC on a schedule: cleanup is operator-driven
+  // kutu never runs GC on a schedule: cleanup is operator-driven
   // here, with a side channel of cheap delete-time cascading in
   // the registry head. The estimate panel below this function
   // surfaces the reclaimable size BEFORE committing to a run.
@@ -326,7 +336,7 @@
     const grace = selectedRepo && selectedRepo.name === repoName
       ? formatSeconds(effectiveGCMinAge(selectedRepo))
       : 'the policy grace window';
-    if (!window.confirm(`Run garbage collection on ${ns}/${repoName}?\n\nThis deletes unreferenced blobs and manifests. Items newer than ${grace} are protected by the grace window.`)) {
+    if (!(await confirmAction({ title: `Run garbage collection on ${ns}/${repoName}?`, message: `Unreferenced blobs and manifests are deleted. Anything newer than ${grace} is kept.`, confirmLabel: 'Run cleanup', danger: true }))) {
       return;
     }
     gcRunning = true;
@@ -357,41 +367,9 @@
   // 2-arg shape (basePath is bound here at the page level).
   const endpointURL = (ns: string, repo: string) => endpointURLUtil(basePath, ns, repo);
 
-  function defaultBasePath(type: RegistryType): string {
-    switch (type) {
-      case 'go': return 'go/';
-      case 'npm': return 'npm/';
-      case 'helm': return 'charts/';
-      case 'maven': return 'maven/';
-      case 'pypi': return 'pypi/';
-      case 'cargo': return 'cargo/';
-      default: return 'docker/';
-    }
-  }
-
-  function defaultCachePath(type: RegistryType): string {
-    switch (type) {
-      case 'go': return 'go-cache/';
-      case 'npm': return 'npm-cache/';
-      case 'helm': return 'charts-cache/';
-      case 'maven': return 'maven-cache/';
-      case 'pypi': return 'pypi-cache/';
-      case 'cargo': return 'cargo-cache/';
-      default: return 'docker-cache/';
-    }
-  }
-
-  function defaultUpstreamURL(type: RegistryType): string {
-    switch (type) {
-      case 'go': return 'https://proxy.golang.org';
-      case 'npm': return 'https://registry.npmjs.org';
-      case 'helm': return 'https://charts.bitnami.com/bitnami';
-      case 'maven': return 'https://repo1.maven.org/maven2';
-      case 'pypi': return 'https://pypi.org';
-      case 'cargo': return 'https://index.crates.io';
-      default: return 'https://registry-1.docker.io';
-    }
-  }
+  const defaultBasePath = (type: RegistryType) => protocol(type).basePath;
+  const defaultCachePath = (type: RegistryType) => protocol(type).cachePath;
+  const defaultUpstreamURL = (type: RegistryType) => protocol(type).upstream;
 
   // ─── Admin actions: CRUD over namespaces + repositories ───
   //
@@ -663,10 +641,13 @@
   async function deleteNamespace(name: string) {
     const ns = namespaces.find((n) => n.name === name);
     const repoCount = ns?.repositories?.length ?? 0;
-    const msg = repoCount > 0
-      ? `Delete namespace "${name}" and its ${repoCount} repositor${repoCount === 1 ? 'y' : 'ies'}?\n\nThis removes the routing configuration. On-disk artifacts under the backing raw mount are NOT deleted.`
-      : `Delete namespace "${name}"?`;
-    if (!window.confirm(msg)) return;
+    const ok = await confirmAction({
+      title: repoCount > 0 ? `Delete namespace "${name}" and its ${repoCount} repositor${repoCount === 1 ? 'y' : 'ies'}?` : `Delete namespace "${name}"?`,
+      message: repoCount > 0 ? 'Only the routing configuration is removed. Artifacts in the backing raw mount stay on disk.' : undefined,
+      confirmLabel: 'Delete namespace',
+      danger: true,
+    });
+    if (!ok) return;
     const tree = namespaces.filter((n) => n.name !== name);
     if (selectedNS === name) {
       selectedNS = tree.length > 0 ? tree[0].name : null;
@@ -795,7 +776,7 @@
       }
       // Prefix-routed upstreams (Go only). Trim blanks; the backend
       // validates prefix/url and seals per-upstream secrets + ssh keys.
-      if (repoDraft.type === 'go' && repoDraft.upstreams?.length) {
+      if (protocol(repoDraft.type).prefixUpstreams && repoDraft.upstreams?.length) {
         const ups = repoDraft.upstreams
           .map((u): RegistryUpstream => {
             const out: RegistryUpstream = {
@@ -823,6 +804,33 @@
     } else if (repoDraft.kind === 'virtual') {
       row.members = repoDraft.members;
       if (repoDraft.default_local) row.default_local = repoDraft.default_local;
+    }
+
+    // Policy, signing, prefetch and replication come from
+    // RepoPolicyEditor, which edits repoDraft in place. Docker's
+    // immutable tags / GC fields (built above) are merged in.
+    const policy = { ...(repoDraft.policy ?? {}), ...(row.policy ?? {}) };
+    if (repoDraft.kind !== 'local' || repoDraft.type !== 'docker') {
+      delete policy.immutable_tags;
+    }
+    if (policy.retention && repoDraft.kind === 'local' && repoDraft.type === 'docker') {
+      policy.retention = { ...(repoDraft.policy?.retention ?? {}), ...(row.policy?.retention ?? {}) };
+    } else if (policy.retention) {
+      delete policy.retention.gc_min_age_seconds;
+      delete policy.retention.abandoned_upload_max_age_seconds;
+    }
+    const cleanPolicy = pruneEmpty(policy);
+    if (cleanPolicy) row.policy = cleanPolicy;
+    else delete row.policy;
+    if (repoDraft.kind === 'local' && protocol(repoDraft.type).signing) {
+      if (repoDraft.signing_key?.trim()) row.signing_key = repoDraft.signing_key;
+      if (repoDraft.signing_key_name?.trim()) row.signing_key_name = repoDraft.signing_key_name.trim();
+    }
+    if (repoDraft.kind === 'remote' && repoDraft.prefetch?.packages?.length) {
+      row.prefetch = { packages: repoDraft.prefetch.packages, interval: repoDraft.prefetch.interval || undefined };
+    }
+    if (repoDraft.kind === 'local' && repoDraft.replication?.source_url?.trim()) {
+      row.replication = { ...repoDraft.replication, source_url: repoDraft.replication.source_url.trim() };
     }
 
     // Common per-repo overrides — applicable across kinds, so live
@@ -860,8 +868,24 @@
     await commitTree(tree);
   }
 
+  // pruneEmpty drops empty strings/arrays/false/0 and empty objects so
+  // the persisted policy stays in the canonical "field absent" form.
+  function pruneEmpty<T>(v: T): T | undefined {
+    if (Array.isArray(v)) return (v.length ? v : undefined) as T | undefined;
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        const p = pruneEmpty(val);
+        if (p !== undefined) out[k] = p;
+      }
+      return (Object.keys(out).length ? out : undefined) as T | undefined;
+    }
+    if (v === '' || v === false || v === 0 || v === null) return undefined;
+    return v;
+  }
+
   async function deleteRepository(namespaceName: string, repoName: string) {
-    if (!window.confirm(`Delete repository "${namespaceName}/${repoName}"?\n\nThe routing configuration is removed. On-disk artifacts under the backing raw mount are NOT deleted.`)) {
+    if (!(await confirmAction({ title: `Delete repository "${namespaceName}/${repoName}"?`, message: 'Only the routing configuration is removed. Artifacts in the backing raw mount stay on disk.', confirmLabel: 'Delete repository', danger: true }))) {
       return;
     }
     const tree = JSON.parse(JSON.stringify(namespaces)) as Namespace[];
@@ -917,42 +941,33 @@
 
 <div class="flex flex-col h-full bg-warm-50 dark:bg-warm-950 text-warm-900 dark:text-warm-100">
   <!-- Header strip -->
-  <header class="flex items-center justify-between px-4 py-2 border-b border-warm-200 dark:border-warm-800 bg-white dark:bg-warm-900">
-    <div class="flex items-center gap-2">
-      <Package size={18} class="text-accent-500" />
-      <h1 class="text-base font-semibold">Registries</h1>
+  <header class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5 border-b border-slate-300 dark:border-warm-700 bg-white dark:bg-warm-900">
+    <div class="flex items-baseline gap-3 min-w-0">
+      <h1 class="text-[17px] font-bold tracking-tight">Registries</h1>
+      <span class="hidden lg:inline text-[13px] text-slate-500 dark:text-warm-400 truncate">
+        {PROTOCOLS.length} package formats
+      </span>
     </div>
-    <div class="flex items-center gap-3">
-      <div class="text-[11px] text-warm-500 dark:text-warm-400">
-        Artifact hub — Go · NPM · Docker / OCI · Helm · Maven · PyPI · Cargo
-      </div>
+    <div class="flex items-center gap-2">
+      <button class="btn btn-secondary btn-sm" onclick={() => (searchOpen = true)} title="Search packages across every repository">
+        <Search size={13} />
+        Search
+      </button>
       {#if canAdmin}
         <button
-          class="flex items-center gap-1 text-xs px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
-          class:bg-warm-100={showListeners}
-          class:dark:bg-warm-800={showListeners}
-          onclick={() => { showListeners = true; mode = null; }}
-          title="Publish repositories on dedicated ports or hostnames"
-        >
-          <RadioTower size={12} />
-          Listeners
-        </button>
-        <button
-          class="flex items-center gap-1 text-xs px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
+          class="btn btn-primary btn-sm"
           onclick={openNewNamespace}
           title="Create a new namespace"
         >
-          <Plus size={12} />
+          <Plus size={13} />
           New namespace
         </button>
       {/if}
     </div>
   </header>
 
-  {#if showListeners}
-    <RegistryListenersPanel {namespaces} {canAdmin} onClose={() => { showListeners = false; }} />
-  {:else if !booted}
-    <div class="flex-1 flex items-center justify-center text-warm-500">
+  {#if !booted}
+    <div class="flex-1 flex items-center justify-center text-slate-500 dark:text-warm-400">
       <Loader2 size={20} class="animate-spin mr-2" />
       Loading registries…
     </div>
@@ -965,9 +980,9 @@
     -->
     <div class="flex-1 flex items-center justify-center">
       <div class="max-w-md text-center px-4">
-        <Package size={48} class="mx-auto text-warm-400 mb-4" />
+        <Package size={48} class="mx-auto text-slate-400 dark:text-warm-500 mb-4" />
         <h2 class="text-lg font-semibold mb-2">Registry feature is disabled</h2>
-        <p class="text-sm text-warm-500 dark:text-warm-400 mb-4">
+        <p class="text-[14px] text-slate-500 dark:text-warm-400 mb-4">
           An administrator has turned off the artifact registry for this deployment.
           Existing namespaces and repositories are preserved — re-enable the feature
           to make them serve again.
@@ -975,33 +990,33 @@
         <a
           href="/settings"
           use:link
-          class="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
+          class="btn btn-secondary"
         >
-          Go to Settings → Features
+          Open Settings
         </a>
       </div>
     </div>
   {:else if namespaces.length === 0}
     <div class="flex-1 flex items-center justify-center">
       <div class="max-w-md text-center px-4">
-        <Package size={48} class="mx-auto text-warm-400 mb-4" />
+        <Package size={48} class="mx-auto text-slate-400 dark:text-warm-500 mb-4" />
         <h2 class="text-lg font-semibold mb-2">No registries configured yet</h2>
-        <p class="text-sm text-warm-500 dark:text-warm-400 mb-4">
-          Pika can host Go modules, NPM packages, Docker / OCI images, Helm charts,
-          Maven artifacts, PyPI packages and Cargo crates using
+        <p class="text-[14px] text-slate-500 dark:text-warm-400 mb-4">
+          kutu can host {PROTOCOLS.length} package formats — from Go, npm, Docker and Maven
+          to NuGet, APT, RPM, Terraform and Hugging Face — using
           your existing raw mounts as storage. Each namespace groups local,
           remote (upstream-proxied) and virtual (aggregated) repositories.
         </p>
         {#if canAdmin}
           <button
-            class="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded border border-accent-300 dark:border-accent-700 bg-accent-50 dark:bg-accent-950/30 hover:bg-accent-100 dark:hover:bg-accent-900/40 text-accent-800 dark:text-accent-200"
+            class="btn btn-primary"
             onclick={openNewNamespace}
           >
             <Plus size={14} />
             Create your first namespace
           </button>
         {:else}
-          <p class="text-xs text-warm-500">
+          <p class="text-[13px] text-slate-500 dark:text-warm-400">
             Ask an administrator with the <span class="font-mono">registry.admin</span>
             capability to configure namespaces and repositories.
           </p>
@@ -1009,12 +1024,12 @@
       </div>
     </div>
   {:else}
-    <div class="flex-1 flex overflow-hidden">
+    <div class="flex-1 flex flex-col md:flex-row overflow-hidden">
       <!-- Namespaces sidebar -->
-      <aside class="w-48 border-r border-warm-200 dark:border-warm-800 bg-white dark:bg-warm-900 overflow-y-auto shrink-0">
-        <div class="px-3 py-2 text-[10px] uppercase tracking-wide text-warm-500 flex items-center justify-between">
+      <aside class="w-full md:w-48 max-h-36 md:max-h-none border-b md:border-b-0 md:border-r border-slate-300 dark:border-warm-700 bg-slate-50 dark:bg-warm-950/60 overflow-y-auto shrink-0" aria-label="Namespaces">
+        <div class="label-caps px-3 pt-3 pb-1.5 text-[11px] text-slate-500 dark:text-warm-400 flex items-center justify-between">
           <span>Namespaces</span>
-          <span class="text-[9px] normal-case text-warm-400">{namespaces.length}</span>
+          <span class="font-mono tracking-normal">{namespaces.length}</span>
         </div>
         {#if namespaces.length > 5}
           <div class="px-2 pb-2">
@@ -1022,36 +1037,38 @@
               type="text"
               placeholder="Filter…"
               bind:value={nsFilter}
-              class="w-full text-[11px] px-2 py-1 bg-warm-50 dark:bg-warm-800 border border-warm-200 dark:border-warm-700 rounded focus:border-accent-500 outline-none"
+              class="input btn-sm"
             />
           </div>
         {/if}
-        <ul>
+        <ul class="px-1.5 pb-3">
           {#each namespaces.filter((n) => matchFilter(n.name, nsFilter)) as ns (ns.name)}
             <li class="group relative">
               <button
-                class="w-full text-left px-3 py-2 hover:bg-warm-100 dark:hover:bg-warm-800 text-sm flex items-center justify-between"
-                class:bg-warm-100={selectedNS === ns.name}
-                class:dark:bg-warm-800={selectedNS === ns.name}
+                class="sel w-full text-left pl-3 pr-2 py-2 rounded-[3px] text-[14px] flex items-center justify-between cursor-pointer"
+                class:is-sel={selectedNS === ns.name}
+                aria-current={selectedNS === ns.name ? 'true' : undefined}
                 onclick={() => { selectedNS = ns.name; selectedRepo = null; }}
               >
                 <span class="font-medium truncate">{ns.name}</span>
-                <span class="text-[10px] text-warm-500 shrink-0 ml-2">
+                <span class="font-mono text-[12px] text-slate-500 dark:text-warm-400 shrink-0 ml-2 group-hover:opacity-0">
                   {ns.repositories?.length ?? 0}
                 </span>
               </button>
               {#if canAdmin}
-                <div class="absolute right-1 top-1/2 -translate-y-1/2 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div class="absolute right-1 top-1/2 -translate-y-1/2 flex gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
                   <button
-                    class="p-1 rounded hover:bg-warm-200 dark:hover:bg-warm-700"
+                    class="btn btn-ghost btn-sm btn-icon !h-6 !w-6"
                     title="Edit namespace"
+                    aria-label={`Edit namespace ${ns.name}`}
                     onclick={(e) => { e.stopPropagation(); openEditNamespace(ns); }}
                   >
                     <Pencil size={11} />
                   </button>
                   <button
-                    class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400"
+                    class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6"
                     title="Delete namespace"
+                    aria-label={`Delete namespace ${ns.name}`}
                     onclick={(e) => { e.stopPropagation(); deleteNamespace(ns.name); }}
                   >
                     <Trash2 size={11} />
@@ -1064,16 +1081,17 @@
       </aside>
 
       <!-- Repositories panel -->
-      <section class="w-72 border-r border-warm-200 dark:border-warm-800 bg-white dark:bg-warm-900 overflow-y-auto shrink-0">
-        <div class="px-3 py-2 text-[10px] uppercase tracking-wide text-warm-500 flex items-center justify-between">
-          <span>Repositories {#if selectedReposTotal > 0}<span class="normal-case text-warm-400">({selectedRepos.length}{repoFilter ? ' / ' + selectedReposTotal : ''})</span>{/if}</span>
+      <section class="w-full md:w-80 flex-1 md:flex-none border-r border-slate-300 dark:border-warm-700 bg-white dark:bg-warm-900 overflow-y-auto md:shrink-0 {selectedRepo || isRepoMode(mode) ? 'hidden md:block' : ''}" aria-label="Repositories">
+        <div class="label-caps px-3 pt-3 pb-1.5 text-[11px] text-slate-500 dark:text-warm-400 flex items-center justify-between">
+          <span>Repositories {#if selectedReposTotal > 0}<span class="font-mono tracking-normal">{selectedRepos.length}{repoFilter ? ' / ' + selectedReposTotal : ''}</span>{/if}</span>
           {#if canAdmin && selectedNS}
             <button
-              class="flex items-center gap-1 text-[10px] normal-case tracking-normal px-1.5 py-0.5 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
+              class="btn btn-secondary btn-sm !h-6 normal-case tracking-normal"
+              style="font-stretch: 100%"
               onclick={() => openNewRepository(selectedNS!)}
               title="Add a new repository to {selectedNS}"
             >
-              <Plus size={10} />
+              <Plus size={12} />
               Add
             </button>
           {/if}
@@ -1084,16 +1102,16 @@
               type="text"
               placeholder="Filter repositories…"
               bind:value={repoFilter}
-              class="w-full text-[11px] px-2 py-1 bg-warm-50 dark:bg-warm-800 border border-warm-200 dark:border-warm-700 rounded focus:border-accent-500 outline-none"
+              class="input btn-sm"
             />
           </div>
         {/if}
         {#if selectedRepos.length === 0}
-          <div class="px-3 py-2 text-xs text-warm-500">
-            Namespace has no repositories yet.
+          <div class="px-3 py-3 text-[13px] text-slate-600 dark:text-warm-300">
+            This namespace has no repositories yet.
             {#if canAdmin && selectedNS}
               <button
-                class="block mt-2 text-accent-600 dark:text-accent-400 hover:underline"
+                class="btn btn-primary btn-sm mt-3"
                 onclick={() => openNewRepository(selectedNS!)}
               >
                 + Add repository
@@ -1101,43 +1119,45 @@
             {/if}
           </div>
         {:else}
-          <ul>
+          <ul class="border-t border-slate-200 dark:border-warm-700">
             {#each selectedRepos as repo (repo.name)}
               {@const TypeIcon = iconFor(repo.type)}
               {@const KindIcon = kindIcon(repo.kind)}
               <li class="group relative">
                 <button
-                  class="w-full text-left px-3 py-2 hover:bg-warm-100 dark:hover:bg-warm-800 border-b border-warm-100 dark:border-warm-800/50"
-                  class:bg-warm-100={selectedRepo?.name === repo.name}
-                  class:dark:bg-warm-800={selectedRepo?.name === repo.name}
+                  class="sel w-full text-left px-3 py-2.5 border-b border-slate-200 dark:border-warm-700 cursor-pointer"
+                  class:is-sel={selectedRepo?.name === repo.name}
+                  aria-current={selectedRepo?.name === repo.name ? 'true' : undefined}
                   onclick={() => selectRepo(repo)}
                 >
                   <div class="flex items-center gap-2">
-                    <TypeIcon size={14} class="text-accent-500 shrink-0" />
-                    <span class="text-sm font-medium truncate">{repo.name}</span>
-                    <span class="ml-auto flex items-center gap-1 text-[9px] uppercase text-warm-500 shrink-0">
+                    <TypeIcon size={15} class="text-accent-600 dark:text-accent-300 shrink-0" />
+                    <span class="text-[14px] font-semibold truncate">{repo.name}</span>
+                    <span class="tag ml-auto shrink-0 group-hover:invisible">
                       <KindIcon size={10} />
                       {repo.kind}
                     </span>
                   </div>
-                  <div class="text-[10px] text-warm-500 mt-0.5 font-mono truncate">
+                  <div class="text-[12px] text-slate-500 dark:text-warm-400 mt-1 font-mono truncate">
                     {repo.type}
                     {#if repo.kind === 'local'}· {repo.mount}{/if}
                     {#if repo.kind === 'remote'}· {repo.url}{/if}
                   </div>
                 </button>
                 {#if canAdmin}
-                  <div class="absolute right-1 top-1.5 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div class="absolute right-2 top-2 flex gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
                     <button
-                      class="p-1 rounded bg-white/80 dark:bg-warm-800/80 hover:bg-warm-200 dark:hover:bg-warm-700"
+                      class="btn btn-ghost btn-sm btn-icon !h-6 !w-6"
                       title="Edit repository"
+                      aria-label={`Edit repository ${repo.name}`}
                       onclick={(e) => { e.stopPropagation(); openEditRepository(selectedNS!, repo); }}
                     >
                       <Pencil size={11} />
                     </button>
                     <button
-                      class="p-1 rounded bg-white/80 dark:bg-warm-800/80 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400"
+                      class="btn btn-danger-ghost btn-sm btn-icon !h-6 !w-6"
                       title="Delete repository"
+                      aria-label={`Delete repository ${repo.name}`}
                       onclick={(e) => { e.stopPropagation(); deleteRepository(selectedNS!, repo.name); }}
                     >
                       <Trash2 size={11} />
@@ -1151,37 +1171,43 @@
       </section>
 
       <!-- Detail panel -->
-      <main class="flex-1 overflow-y-auto bg-warm-50 dark:bg-warm-950">
+      <main class="flex-1 min-w-0 overflow-y-auto bg-slate-100 dark:bg-warm-900 {selectedRepo || isRepoMode(mode) ? '' : 'hidden md:block'}">
         {#if isRepoMode(mode)}
           <!-- Inline repository create/edit form (replaces the old
                modal so the operator keeps the namespace + repo list
                in view while configuring). -->
           {@render repositoryFormPanel()}
         {:else if !selectedRepo}
-          <div class="h-full flex items-center justify-center text-sm text-warm-500">
-            Select a repository to inspect its contents.
+          <div class="m-4 sm:m-6 h-[calc(100%-3rem)] leaf border-dashed flex flex-col items-center justify-center gap-2 px-6 text-center">
+            <Package size={28} class="text-accent-500" />
+            <p class="text-[14px] font-semibold text-slate-800 dark:text-warm-100">Pick a repository</p>
+            <p class="text-[13px] text-slate-500 dark:text-warm-400 max-w-xs">Its endpoint, storage use and packages show up here.</p>
           </div>
         {:else}
           {@const repo = selectedRepo}
           {@const TypeIcon = iconFor(repo.type)}
           {@const KindIcon = kindIcon(repo.kind)}
           {@const endpoint = endpointURL(selectedNS ?? '', repo.name)}
+          {@const setup = fillSnippet(protocol(repo.type).setup, snippetVars(endpoint, repo.name))}
 
-          <div class="p-4 max-w-4xl">
+          <div class="px-4 sm:px-6 py-5 max-w-5xl">
+            <button type="button" class="btn btn-ghost btn-sm -ml-2 mb-2 md:hidden" onclick={() => (selectedRepo = null)}>
+              <ChevronRight size={14} class="rotate-180" /> Repositories
+            </button>
             <!-- Repo header -->
-            <div class="flex items-center gap-2 mb-3">
-              <TypeIcon size={22} class="text-accent-500" />
-              <h2 class="text-lg font-semibold">{repo.name}</h2>
-              <span class="flex items-center gap-1 text-[10px] uppercase text-warm-500 px-1.5 py-0.5 rounded border border-warm-300 dark:border-warm-700">
+            <div class="flex flex-wrap items-center gap-2 mb-3">
+              <TypeIcon size={22} class="text-accent-600 dark:text-accent-300" />
+              <h2 class="text-[22px] font-bold tracking-tight mr-1">{repo.name}</h2>
+              <span class="tag">
                 <KindIcon size={11} />
                 {repo.kind}
               </span>
-              <span class="text-[10px] uppercase text-warm-500 px-1.5 py-0.5 rounded border border-warm-300 dark:border-warm-700">
+              <span class="tag">
                 {repo.type}
               </span>
               {#if (repo.kind === 'remote' || repo.kind === 'virtual') && canAdmin}
                 <button
-                  class="ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800 disabled:opacity-50"
+                  class="btn btn-secondary btn-sm ml-auto"
                   disabled={purgeRunning || repo.kind === 'virtual'}
                   onclick={() => runCachePurge(selectedNS ?? '', repo)}
                   title={repo.kind === 'virtual'
@@ -1211,23 +1237,20 @@
             </div>
 
             {#if repo.description}
-              <p class="text-xs text-warm-600 dark:text-warm-400 mb-3">
+              <p class="text-[14px] text-slate-600 dark:text-warm-300 mb-4 max-w-[65ch]">
                 {repo.description}
               </p>
             {/if}
 
             <!-- Endpoint snippet -->
-            <div class="mb-4 border border-warm-200 dark:border-warm-800 rounded-md bg-white dark:bg-warm-900 p-3">
-              <div class="text-[10px] uppercase tracking-wide text-warm-500 mb-1">
-                Endpoint
-              </div>
-              <div class="flex items-center gap-2">
-                <code class="flex-1 text-xs font-mono bg-warm-100 dark:bg-warm-800 px-2 py-1 rounded truncate">
-                  {endpoint}
-                </code>
+            <div class="mb-4 leaf flex items-center gap-3 pl-4 pr-2 py-2">
+              <span class="label-caps text-[11px] text-slate-500 dark:text-warm-400 shrink-0">Endpoint</span>
+              <code class="flex-1 min-w-0 text-[13px] font-mono truncate select-all">{endpoint}</code>
+              <div class="contents">
                 <button
-                  class="p-1.5 rounded hover:bg-warm-100 dark:hover:bg-warm-800"
+                  class="btn btn-ghost btn-sm btn-icon"
                   title="Copy endpoint URL"
+                  aria-label="Copy endpoint URL"
                   onclick={() => copyToClipboard(endpoint)}
                 >
                   <Copy size={14} />
@@ -1235,55 +1258,71 @@
               </div>
             </div>
 
+            <!-- Client setup -->
+            <details class="mb-4 leaf" open={!LEGACY_TYPES.includes(repo.type)}>
+              <summary class="cursor-pointer px-4 py-2 label-caps text-[11px] text-slate-500 dark:text-warm-400 flex items-center gap-2">
+                Client setup
+                <button
+                  class="btn btn-ghost btn-sm btn-icon ml-auto"
+                  title="Copy setup snippet"
+                  aria-label="Copy setup snippet"
+                  onclick={(e) => { e.preventDefault(); copyToClipboard(setup); }}
+                >
+                  <Copy size={13} />
+                </button>
+              </summary>
+              <pre class="px-4 pb-3 text-[12px] font-mono whitespace-pre-wrap break-all text-slate-700 dark:text-warm-200">{setup}</pre>
+            </details>
+
             <!-- Per-kind metadata strip -->
-            <div class="mb-4 grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-              <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                <div class="text-[10px] uppercase text-warm-500">Type / Kind</div>
+            <div class="mb-4 leaf grid grid-cols-2 md:grid-cols-3 overflow-hidden meta">
+              <div class="cell">
+                <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Type / Kind</div>
                 <div class="font-mono">{repo.type} · {repo.kind}</div>
               </div>
               {#if repo.kind === 'local'}
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                  <div class="text-[10px] uppercase text-warm-500">Mount</div>
+                <div class="cell">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Mount</div>
                   <div class="font-mono truncate">{repo.mount}</div>
                 </div>
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                  <div class="text-[10px] uppercase text-warm-500">Base path</div>
+                <div class="cell">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Base path</div>
                   <div class="font-mono truncate">{repo.base_path || '/'}</div>
                 </div>
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                  <div class="text-[10px] uppercase text-warm-500">Push enabled</div>
+                <div class="cell">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Push enabled</div>
                   <div class="font-mono">{repo.allow_push ? 'yes' : 'no'}</div>
                 </div>
                 {#if repo.type === 'docker'}
-                  <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                    <div class="text-[10px] uppercase text-warm-500">Immutable tags</div>
+                  <div class="cell">
+                    <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Immutable tags</div>
                     <div class="font-mono truncate">{repo.policy?.immutable_tags?.join(', ') || 'none'}</div>
                   </div>
-                  <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                    <div class="text-[10px] uppercase text-warm-500">GC grace</div>
+                  <div class="cell">
+                    <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">GC grace</div>
                     <div class="font-mono">{formatSeconds(effectiveGCMinAge(repo))}</div>
                   </div>
-                  <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                    <div class="text-[10px] uppercase text-warm-500">Stale uploads</div>
+                  <div class="cell">
+                    <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Stale uploads</div>
                     <div class="font-mono">{formatSeconds(effectiveAbandonedUploadMaxAge(repo))}</div>
                   </div>
                 {/if}
               {:else if repo.kind === 'remote'}
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900 col-span-2">
-                  <div class="text-[10px] uppercase text-warm-500">Upstream</div>
+                <div class="cell col-span-2">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Upstream</div>
                   <div class="font-mono truncate">{repo.url}</div>
                 </div>
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                  <div class="text-[10px] uppercase text-warm-500">Cache mount</div>
+                <div class="cell">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Cache mount</div>
                   <div class="font-mono truncate">{repo.mount}</div>
                 </div>
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900">
-                  <div class="text-[10px] uppercase text-warm-500">Cache path</div>
+                <div class="cell">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Cache path</div>
                   <div class="font-mono truncate">{repo.base_path || '/'}</div>
                 </div>
               {:else if repo.kind === 'virtual'}
-                <div class="border border-warm-200 dark:border-warm-800 rounded p-2 bg-white dark:bg-warm-900 col-span-2">
-                  <div class="text-[10px] uppercase text-warm-500">Members (in lookup order)</div>
+                <div class="cell col-span-2">
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Members (in lookup order)</div>
                   <div class="font-mono truncate">
                     {repo.members?.join(', ') ?? '(none)'}
                   </div>
@@ -1296,94 +1335,107 @@
                  members). Re-fetched on each repo selection; the
                  server walks storage live so we don't poll. -->
             {#if repo.kind !== 'virtual'}
-              <div class="mb-4 border border-warm-200 dark:border-warm-800 rounded-md bg-white dark:bg-warm-900 p-3">
+              <div class="mb-4 leaf p-3">
                 <div class="flex items-center justify-between mb-2">
-                  <div class="text-[10px] uppercase tracking-wide text-warm-500">Statistics</div>
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Statistics</div>
                   <button
-                    class="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-warm-100 dark:hover:bg-warm-800"
+                    class="btn btn-ghost btn-sm !h-6"
                     title="Re-fetch counts"
                     disabled={statsLoading}
                     onclick={() => selectedNS && loadStats(selectedNS, repo)}
                   >
                     {#if statsLoading}
-                      <Loader2 size={10} class="animate-spin" />
+                      <Loader2 size={12} class="animate-spin" />
                     {:else}
-                      <RotateCw size={10} />
+                      <RotateCw size={12} />
                     {/if}
-                    refresh
+                    Recount
                   </button>
                 </div>
                 {#if statsLoading && !stats}
-                  <div class="text-xs text-warm-500">Loading…</div>
+                  <div class="text-[13px] text-slate-500 dark:text-warm-400">Loading…</div>
                 {:else if !stats}
-                  <div class="text-xs text-warm-500">Statistics unavailable.</div>
+                  <div class="text-[13px] text-slate-500 dark:text-warm-400">Statistics unavailable.</div>
                 {:else}
-                  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 text-xs">
+                  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 text-[13px]">
                     {#if repo.type === 'go'}
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Modules</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Modules</div>
                         <div class="font-mono">{stats.module_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Versions</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Versions</div>
                         <div class="font-mono">{stats.version_count ?? 0}</div>
                       </div>
                     {:else if repo.type === 'npm'}
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Packages</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Packages</div>
                         <div class="font-mono">{stats.package_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Versions</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Versions</div>
                         <div class="font-mono">{stats.version_count ?? 0}</div>
                       </div>
                     {:else if repo.type === 'maven'}
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Artifacts</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Artifacts</div>
                         <div class="font-mono">{stats.package_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Versions</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Versions</div>
                         <div class="font-mono">{stats.version_count ?? 0}</div>
                       </div>
                     {:else if repo.type === 'pypi'}
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Packages</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Packages</div>
                         <div class="font-mono">{stats.package_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Versions</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Versions</div>
                         <div class="font-mono">{stats.version_count ?? 0}</div>
                       </div>
                     {:else if repo.type === 'cargo'}
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Crates</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Crates</div>
                         <div class="font-mono">{stats.package_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Versions</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Versions</div>
                         <div class="font-mono">{stats.version_count ?? 0}</div>
+                      </div>
+                    {:else if !LEGACY_TYPES.includes(repo.type)}
+                      <div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Packages</div>
+                        <div class="font-mono">{stats.package_count ?? 0}</div>
+                      </div>
+                      <div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Versions</div>
+                        <div class="font-mono">{stats.version_count ?? 0}</div>
+                      </div>
+                      <div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Files</div>
+                        <div class="font-mono">{stats.blob_count ?? 0}</div>
                       </div>
                     {:else if repo.type === 'docker'}
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Repos</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Repos</div>
                         <div class="font-mono">{stats.repository_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Tags</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Tags</div>
                         <div class="font-mono">{stats.tag_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Manifests</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Manifests</div>
                         <div class="font-mono">{stats.manifest_count ?? 0}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Blobs</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Blobs</div>
                         <div class="font-mono">{stats.blob_count ?? 0}</div>
                       </div>
                     {/if}
                     <div>
-                      <div class="text-[10px] uppercase text-warm-500">Total size</div>
+                      <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Total size</div>
                       <div class="font-mono">{humanBytes(stats.total_bytes ?? 0)}</div>
                     </div>
                   </div>
@@ -1400,12 +1452,12 @@
                  Operators trigger that pass here; the estimate
                  row tells them whether it's worth the click. -->
             {#if repo.type === 'docker' && repo.kind === 'local' && canAdmin}
-              <div class="mb-4 border border-warm-200 dark:border-warm-800 rounded-md bg-white dark:bg-warm-900 p-3">
+              <div class="mb-4 leaf p-3">
                 <div class="flex items-center justify-between mb-2">
-                  <div class="text-[10px] uppercase tracking-wide text-warm-500">Garbage</div>
+                  <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Garbage</div>
                   <div class="flex items-center gap-2">
                     <button
-                      class="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-warm-100 dark:hover:bg-warm-800 disabled:opacity-50"
+                      class="text-[11px] flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-warm-100 dark:hover:bg-warm-800 disabled:opacity-50"
                       title="Dry-run mark-and-sweep: estimate reclaimable garbage without deleting anything"
                       disabled={gcEstimateLoading || gcRunning}
                       onclick={() => selectedNS && refreshGCEstimate(selectedNS, repo.name)}
@@ -1418,7 +1470,7 @@
                       estimate
                     </button>
                     <button
-                      class="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800 disabled:opacity-50"
+                      class="text-[11px] flex items-center gap-1 px-1.5 py-0.5 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800 disabled:opacity-50"
                       title={`Run cleanup now: deletes unreferenced blobs, manifests and abandoned upload tmp files. Items modified in the last ${formatSeconds(effectiveGCMinAge(repo))} are protected.`}
                       disabled={gcRunning || gcEstimateLoading}
                       onclick={() => runDockerGC(selectedNS ?? '', repo.name)}
@@ -1432,13 +1484,13 @@
                     </button>
                   </div>
                 </div>
-                <div class="mb-2 text-[10px] text-warm-500">
+                <div class="mb-2 text-[11px] text-slate-500 dark:text-warm-400">
                   Policy defaults: GC grace {formatSeconds(effectiveGCMinAge(repo))}, stale uploads {formatSeconds(effectiveAbandonedUploadMaxAge(repo))}.
                 </div>
                 {#if gcEstimateLoading && !gcEstimate}
-                  <div class="text-xs text-warm-500">Calculating…</div>
+                  <div class="text-[13px] text-slate-500 dark:text-warm-400">Calculating…</div>
                 {:else if !gcEstimate || gcEstimateRepoKey !== `${selectedNS}/${repo.name}`}
-                  <div class="text-xs text-warm-500">
+                  <div class="text-[13px] text-slate-500 dark:text-warm-400">
                     Click <span class="font-medium">estimate</span> to see how much storage can be reclaimed.
                   </div>
                 {:else}
@@ -1447,30 +1499,30 @@
                     && gcEstimate.swept_manifests === 0
                     && gcEstimate.abandoned_uploads_removed === 0}
                   {#if nothingToDo}
-                    <div class="text-xs text-warm-500">
+                    <div class="text-[13px] text-slate-500 dark:text-warm-400">
                       Nothing reclaimable — registry is clean.
                     </div>
                   {:else}
-                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[13px]">
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Reclaimable</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Reclaimable</div>
                         <div class="font-mono">{humanBytes(totalReclaimable)}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Blobs</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Blobs</div>
                         <div class="font-mono">{gcEstimate.swept_blobs}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Manifests</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Manifests</div>
                         <div class="font-mono">{gcEstimate.swept_manifests}</div>
                       </div>
                       <div>
-                        <div class="text-[10px] uppercase text-warm-500">Stale uploads</div>
+                        <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400 mb-1">Stale uploads</div>
                         <div class="font-mono">{gcEstimate.abandoned_uploads_removed}</div>
                       </div>
                     </div>
                     {#if gcEstimate.skipped_young > 0}
-                      <div class="mt-2 text-[10px] text-warm-500">
+                      <div class="mt-2 text-[11px] text-slate-500 dark:text-warm-400">
                         {gcEstimate.skipped_young} item{gcEstimate.skipped_young === 1 ? '' : 's'} protected by grace window (modified &lt; {formatSeconds(effectiveGCMinAge(repo))} ago).
                       </div>
                     {/if}
@@ -1481,7 +1533,74 @@
 
             <!-- Browser. Each protocol renders its cached/local package
                  index with the same click-through detail interaction. -->
-            {#if repo.type === 'go' || repo.type === 'npm' || repo.type === 'docker' || repo.type === 'helm' || repo.type === 'maven' || repo.type === 'pypi' || repo.type === 'cargo'}
+            <RepoOperations
+              namespace={selectedNS ?? ''}
+              {repo}
+              siblings={(namespaces.find((n) => n.name === selectedNS)?.repositories ?? []).filter((r) => r.type === repo.type && r.kind === 'local' && r.name !== repo.name)}
+              {canAdmin}
+              {canDelete}
+              onchanged={refreshAfterArtifactDelete}
+            />
+
+            {#if !LEGACY_TYPES.includes(repo.type)}
+              <div class="leaf">
+                <div class="px-3 py-2 border-b border-slate-200 dark:border-warm-700 flex items-center gap-2">
+                  <FolderTree size={14} class="text-accent-500" />
+                  <span class="text-[14px] font-semibold">Packages</span>
+                  {#if entriesLoading}
+                    <Loader2 size={12} class="animate-spin text-slate-500 dark:text-warm-400" />
+                  {:else}
+                    <span class="text-[11px] text-slate-500 dark:text-warm-400">({genericEntries.length})</span>
+                  {/if}
+                  {#if genericEntries.length > 0}
+                    <div class="ml-auto flex items-center gap-1">
+                      <Search size={10} class="text-slate-500 dark:text-warm-400" />
+                      <input
+                        type="text"
+                        placeholder="Filter…"
+                        bind:value={entryFilter}
+                        class="text-[12px] px-1.5 py-0.5 w-32 bg-warm-50 dark:bg-warm-800 border border-warm-200 dark:border-warm-700 rounded focus:border-accent-500 outline-none"
+                      />
+                    </div>
+                  {/if}
+                </div>
+                {#if genericEntries.length === 0 && !entriesLoading}
+                  <div class="px-3 py-4 text-[13px] text-slate-500 dark:text-warm-400 text-center">
+                    {#if repo.kind === 'local'}
+                      Nothing published yet — see <span class="font-medium">Client setup</span> above.
+                    {:else if repo.kind === 'remote'}
+                      Nothing in cache yet — the first client request will populate this list.
+                    {:else}
+                      No member repository has packages yet.
+                    {/if}
+                  </div>
+                {:else}
+                  {@const GenIcon = iconFor(repo.type)}
+                  <ul class="text-[14px]">
+                    {#each genericEntries.filter((p) => matchFilter(p.name, entryFilter)) as p (p.name)}
+                      {@const vs = p.versions ?? []}
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
+                        <button
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
+                          onclick={() => openDetail(p.name, repo.type)}
+                          title="View details"
+                        >
+                          <GenIcon size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px] truncate">{p.name}</span>
+                          {#if vs.length > 0}
+                            <span class="text-[11px] text-accent-500 font-mono shrink-0">@{vs[vs.length - 1]}</span>
+                          {/if}
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400 shrink-0">
+                            {vs.length} version{vs.length === 1 ? '' : 's'}
+                          </span>
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500 shrink-0" />
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            {:else if repo.type === 'go' || repo.type === 'npm' || repo.type === 'docker' || repo.type === 'helm' || repo.type === 'maven' || repo.type === 'pypi' || repo.type === 'cargo'}
               {@const isGo = repo.type === 'go'}
               {@const isNpm = repo.type === 'npm'}
               {@const isDocker = repo.type === 'docker'}
@@ -1491,38 +1610,38 @@
               {@const isCargo = repo.type === 'cargo'}
               {@const entryLabel = isGo ? 'Modules' : isNpm ? 'Packages' : isDocker ? 'Repositories' : isHelm ? 'Charts' : isMaven ? 'Artifacts' : isPyPI ? 'Packages' : 'Crates'}
               {@const entryCount = isGo ? modules.length : isNpm ? packages.length : isDocker ? images.length : isHelm ? charts.length : isMaven ? mavenArtifacts.length : isPyPI ? pypiPackages.length : cargoCrates.length}
-              <div class="border border-warm-200 dark:border-warm-800 rounded-md bg-white dark:bg-warm-900">
-                <div class="px-3 py-2 border-b border-warm-200 dark:border-warm-800 flex items-center gap-2">
+              <div class="leaf">
+                <div class="px-3 py-2 border-b border-slate-200 dark:border-warm-700 flex items-center gap-2">
                   <FolderTree size={14} class="text-accent-500" />
-                  <span class="text-sm font-semibold">{entryLabel}</span>
+                  <span class="text-[14px] font-semibold">{entryLabel}</span>
                   {#if entriesLoading}
-                    <Loader2 size={12} class="animate-spin text-warm-500" />
+                    <Loader2 size={12} class="animate-spin text-slate-500 dark:text-warm-400" />
                   {:else if repo.kind !== 'virtual'}
-                    <span class="text-[10px] text-warm-500">({entryCount})</span>
+                    <span class="text-[11px] text-slate-500 dark:text-warm-400">({entryCount})</span>
                   {/if}
                   {#if repo.kind !== 'virtual' && entryCount > 0}
                     <div class="ml-auto flex items-center gap-1">
-                      <Search size={10} class="text-warm-500" />
+                      <Search size={10} class="text-slate-500 dark:text-warm-400" />
                       <input
                         type="text"
                         placeholder="Filter…"
                         bind:value={entryFilter}
-                        class="text-[11px] px-1.5 py-0.5 w-32 bg-warm-50 dark:bg-warm-800 border border-warm-200 dark:border-warm-700 rounded focus:border-accent-500 outline-none"
+                        class="text-[12px] px-1.5 py-0.5 w-32 bg-warm-50 dark:bg-warm-800 border border-warm-200 dark:border-warm-700 rounded focus:border-accent-500 outline-none"
                       />
                     </div>
                   {/if}
                 </div>
                 {#if repo.kind === 'virtual'}
-                  <div class="px-3 py-2 text-xs text-warm-500">
+                  <div class="px-3 py-2 text-[13px] text-slate-500 dark:text-warm-400">
                     Virtual repositories aggregate at request time; entry
                     listings live on the underlying member repositories.
                   </div>
                 {:else if entryCount === 0 && !entriesLoading}
-                  <div class="px-3 py-4 text-xs text-warm-500 text-center">
+                  <div class="px-3 py-4 text-[13px] text-slate-500 dark:text-warm-400 text-center">
                     {#if repo.kind === 'local'}
                       {isGo ? 'No modules' : isNpm ? 'No packages' : isDocker ? 'No images' : isHelm ? 'No charts' : isMaven ? 'No artifacts' : isPyPI ? 'No packages' : 'No crates'} uploaded yet.
                       {#if isGo && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # upload via curl{'\n'}
                           curl -XPUT -H "Authorization: Bearer $TOKEN" \{'\n'}
                           {'  '}-H "Content-Type: application/json" \{'\n'}
@@ -1530,35 +1649,35 @@
                           {'  '}{endpoint}/&lt;module&gt;/@v/v1.0.0.info
                         </div>
                       {:else if isNpm && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # publish via npm{'\n'}
                           npm publish --registry={endpoint}/
                         </div>
                       {:else if isDocker && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # push via docker{'\n'}
                           docker tag &lt;img&gt; {endpoint.replace(/^https?:\/\//, '')}/v2/&lt;img&gt;:&lt;tag&gt;{'\n'}
                           docker push {endpoint.replace(/^https?:\/\//, '')}/v2/&lt;img&gt;:&lt;tag&gt;
                         </div>
                       {:else if isHelm && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # publish via curl (ChartMuseum-compatible){'\n'}
                           curl -XPOST -H "Authorization: Bearer $TOKEN" \{'\n'}
                           {'  '}--data-binary @mychart-1.0.0.tgz \{'\n'}
                           {'  '}{endpoint}/api/charts
                         </div>
                       {:else if isMaven && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # deploy via Maven settings.xml / pom.xml repository URL{`\n`}
                           {endpoint}/com/example/app/1.0.0/app-1.0.0.jar
                         </div>
                       {:else if isPyPI && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # publish via twine{`\n`}
                           twine upload --repository-url {endpoint}/ dist/*
                         </div>
                       {:else if isCargo && repo.allow_push}
-                        <div class="mt-2 text-[11px] font-mono text-left bg-warm-100 dark:bg-warm-800 p-2 rounded">
+                        <div class="mt-2 text-[12px] font-mono text-left bg-slate-100 dark:bg-warm-950 p-2.5 rounded-[3px]">
                           # seed a crate archive via HTTP PUT{`\n`}
                           curl -XPUT --data-binary @crate.crate {endpoint}/api/v1/crates/&lt;crate&gt;/&lt;version&gt;/download
                         </div>
@@ -1569,143 +1688,143 @@
                     {/if}
                   </div>
                 {:else if isGo}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each modules.filter((m) => matchFilter(m.module, entryFilter)) as m (m.module)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(m.module, 'go')}
                           title="View details"
                         >
-                          <FileBox size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{m.module}</span>
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <FileBox size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{m.module}</span>
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {m.versions.length} version{m.versions.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
                   </ul>
                 {:else if isDocker}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each images.filter((i) => matchFilter(i.name, entryFilter)) as img (img.name)}
                       {@const hasArtifacts = img.tags.some((t) => t.artifact_type)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(img.name, 'docker')}
                           title="View details"
                         >
-                          <Container size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{img.name}</span>
+                          <Container size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{img.name}</span>
                           {#if hasArtifacts}
-                            <span class="text-[9px] uppercase px-1 py-0.5 rounded bg-accent-500/10 text-accent-500 border border-accent-500/30">
+                            <span class="text-[11px] uppercase px-1 py-0.5 rounded bg-accent-500/10 text-accent-500 border border-accent-500/30">
                               OCI artifact
                             </span>
                           {/if}
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {img.tags.length} tag{img.tags.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
                   </ul>
                 {:else if isNpm}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each packages.filter((p) => matchFilter(p.name, entryFilter)) as p (p.name)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(p.name, 'npm')}
                           title="View details"
                         >
-                          <Package size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{p.name}</span>
+                          <Package size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{p.name}</span>
                           {#if p.dist_tags?.latest}
-                            <span class="text-[10px] text-accent-500 font-mono">@{p.dist_tags.latest}</span>
+                            <span class="text-[11px] text-accent-500 font-mono">@{p.dist_tags.latest}</span>
                           {/if}
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {p.versions.length} version{p.versions.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
                   </ul>
                 {:else if isHelm}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each charts.filter((ch) => matchFilter(ch.name, entryFilter)) as ch (ch.name)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(ch.name, 'helm')}
                           title="View details"
                         >
-                          <Anchor size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{ch.name}</span>
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <Anchor size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{ch.name}</span>
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {ch.versions.length} version{ch.versions.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
                   </ul>
                 {:else if isMaven}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each mavenArtifacts.filter((a) => matchFilter(`${a.group_id}:${a.artifact_id}`, entryFilter)) as art (`${art.group_id}:${art.artifact_id}`)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(`${art.group_id}:${art.artifact_id}`, 'maven')}
                           title="View details"
                         >
-                          <Package size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{art.group_id}:{art.artifact_id}</span>
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <Package size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{art.group_id}:{art.artifact_id}</span>
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {art.versions.length} version{art.versions.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
                   </ul>
                 {:else if isPyPI}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each pypiPackages.filter((p) => matchFilter(p.name, entryFilter)) as p (p.name)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(p.name, 'pypi')}
                           title="View details"
                         >
-                          <Package size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{p.name}</span>
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <Package size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{p.name}</span>
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {p.versions.length} version{p.versions.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
                   </ul>
                 {:else if isCargo}
-                  <ul class="text-sm">
+                  <ul class="text-[14px]">
                     {#each cargoCrates.filter((c) => matchFilter(c.name, entryFilter)) as cr (cr.name)}
-                      <li class="border-b border-warm-100 dark:border-warm-800/50 last:border-b-0">
+                      <li class="border-b border-slate-200 dark:border-warm-700 last:border-b-0">
                         <button
-                          class="w-full text-left px-3 py-2 hover:bg-warm-50 dark:hover:bg-warm-800/50 flex items-center gap-2"
+                          class="w-full text-left px-3 py-2 hover:bg-slate-100 dark:hover:bg-warm-800 flex items-center gap-2"
                           onclick={() => openDetail(cr.name, 'cargo')}
                           title="View details"
                         >
-                          <Package size={14} class="text-warm-500" />
-                          <span class="font-mono text-xs">{cr.name}</span>
-                          <span class="ml-auto text-[10px] text-warm-500">
+                          <Package size={14} class="text-slate-500 dark:text-warm-400" />
+                          <span class="font-mono text-[13px]">{cr.name}</span>
+                          <span class="ml-auto text-[11px] text-slate-500 dark:text-warm-400">
                             {cr.versions.length} version{cr.versions.length === 1 ? '' : 's'}
                           </span>
-                          <ChevronRight size={12} class="text-warm-400" />
+                          <ChevronRight size={12} class="text-slate-400 dark:text-warm-500" />
                         </button>
                       </li>
                     {/each}
@@ -1713,7 +1832,7 @@
                 {/if}
               </div>
             {:else}
-              <div class="border border-warm-200 dark:border-warm-800 rounded-md bg-white dark:bg-warm-900 px-3 py-4 text-xs text-warm-500 text-center">
+              <div class="leaf px-3 py-4 text-[13px] text-slate-500 dark:text-warm-400 text-center">
                 The browser for {repo.type} registries is coming in a follow-up
                 phase. The endpoint above is already live.
               </div>
@@ -1743,29 +1862,29 @@
     {/snippet}
 
     {#if isNamespaceMode(mode)}
-        <div class="p-4 space-y-3 text-sm">
+        <div class="p-4 space-y-3 text-[14px]">
             <!-- ── Namespace form ── -->
             <label class="block">
-              <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                Name <span class="text-red-500">*</span>
+              <span class="field-label block mb-1.5">
+                Name <span class="text-vermilion-500">*</span>
               </span>
               <input
                 type="text"
-                class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                class="input font-mono"
                 bind:value={nsDraft.name}
                 placeholder="my-team"
                 pattern="[a-z0-9_-]+"
               />
-              <span class="block mt-1 text-[10px] text-warm-500">
+              <span class="field-hint block mt-1">
                 Lowercase alphanumerics, hyphen and underscore. Becomes the URL path segment.
               </span>
             </label>
 
             <label class="block">
-              <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">Description</span>
+              <span class="field-label block mb-1.5">Description</span>
               <input
                 type="text"
-                class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                class="input"
                 bind:value={nsDraft.description}
                 placeholder="Optional"
               />
@@ -1775,14 +1894,14 @@
 
     {#snippet footer()}
       <button
-        class="px-3 py-1 text-xs rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
+        class="px-3 py-1 text-[13px] rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
         onclick={cancelModal}
         disabled={saving}
       >
         Cancel
       </button>
       <button
-        class="px-3 py-1 text-xs rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50 flex items-center gap-1"
+        class="px-3 py-1 text-[13px] rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50 flex items-center gap-1"
         onclick={saveNamespace}
         disabled={saving}
       >
@@ -1808,15 +1927,15 @@
           <X size={16} />
         </button>
       </div>
-      <div class="rounded-lg border border-warm-200 dark:border-warm-800 bg-white dark:bg-warm-900 p-4 space-y-3 text-sm">
+      <div class="rounded-lg border border-slate-200 dark:border-warm-700 bg-white dark:bg-warm-900 p-4 space-y-3 text-[14px]">
             <!-- ── Repository form ── -->
             <label class="block">
-              <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                Name <span class="text-red-500">*</span>
+              <span class="field-label block mb-1.5">
+                Name <span class="text-vermilion-500">*</span>
               </span>
               <input
                 type="text"
-                class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                class="input font-mono"
                 bind:value={repoDraft.name}
                 placeholder="proxy-cache"
                 pattern="[a-z0-9_-]+"
@@ -1824,10 +1943,10 @@
             </label>
 
             <label class="block">
-              <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">Description</span>
+              <span class="field-label block mb-1.5">Description</span>
               <input
                 type="text"
-                class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                class="input"
                 bind:value={repoDraft.description}
                 placeholder="Optional"
               />
@@ -1835,29 +1954,25 @@
 
             <div class="grid grid-cols-2 gap-3">
               <label class="block">
-                <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                  Type <span class="text-red-500">*</span>
+                <span class="field-label block mb-1.5">
+                  Type <span class="text-vermilion-500">*</span>
                 </span>
                 <select
-                  class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                  class="input"
                   bind:value={repoDraft.type}
                 >
-                  <option value="go">Go modules</option>
-                  <option value="npm">NPM packages</option>
-                  <option value="docker">Docker / OCI</option>
-                  <option value="helm">Helm charts</option>
-                  <option value="maven">Maven artifacts</option>
-                  <option value="pypi">PyPI packages</option>
-                  <option value="cargo">Cargo crates</option>
+                  {#each PROTOCOLS as p (p.type)}
+                    <option value={p.type}>{p.label}</option>
+                  {/each}
                 </select>
               </label>
 
               <label class="block">
-                <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                  Kind <span class="text-red-500">*</span>
+                <span class="field-label block mb-1.5">
+                  Kind <span class="text-vermilion-500">*</span>
                 </span>
                 <select
-                  class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                  class="input"
                   bind:value={repoDraft.kind}
                 >
                   <option value="local">Local — stored on a raw mount</option>
@@ -1869,18 +1984,18 @@
 
             {#if repoDraft.kind === 'local'}
               <!-- ── Local: mount + base path ── -->
-              <div class="rounded border border-warm-200 dark:border-warm-800 p-3 bg-warm-50/50 dark:bg-warm-950/30 space-y-3">
+              <div class="rounded border border-slate-200 dark:border-warm-700 p-3 bg-warm-50/50 dark:bg-warm-950/30 space-y-3">
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                    Storage mount <span class="text-red-500">*</span>
+                  <span class="field-label block mb-1.5">
+                    Storage mount <span class="text-vermilion-500">*</span>
                   </span>
                   {#if rawMounts.length === 0}
-                    <div class="text-[11px] text-amber-700 dark:text-amber-400">
+                    <div class="text-[12px] text-amber-700 dark:text-amber-400">
                       No raw mounts configured. Add one under Settings → Raw mounts first.
                     </div>
                   {:else}
                     <select
-                      class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="input font-mono"
                       bind:value={repoDraft.mount}
                     >
                       <option value="">— select a mount —</option>
@@ -1892,16 +2007,16 @@
                 </label>
 
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                    Base path <span class="text-red-500">*</span>
+                  <span class="field-label block mb-1.5">
+                    Base path <span class="text-vermilion-500">*</span>
                   </span>
                   <input
                     type="text"
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                    class="input font-mono"
                     bind:value={repoDraft.base_path}
                     placeholder={defaultBasePath(repoDraft.type)}
                   />
-                  <span class="block mt-1 text-[10px] text-warm-500">
+                  <span class="field-hint block mt-1">
                     Path inside the mount where artifacts will be stored.
                   </span>
                 </label>
@@ -1913,29 +2028,29 @@
                     checked={repoDraft.allow_push !== false}
                     onchange={(e) => repoDraft.allow_push = (e.currentTarget as HTMLInputElement).checked}
                   />
-                  <span class="text-xs">Allow publish / push (otherwise read-only)</span>
+                  <span class="text-[13px]">Allow publish / push (otherwise read-only)</span>
                 </label>
 
                 {#if repoDraft.type === 'docker'}
-                  <div class="rounded border border-warm-200 dark:border-warm-800 p-3 bg-white dark:bg-warm-900 space-y-3">
+                  <div class="rounded border border-slate-200 dark:border-warm-700 p-3 bg-white dark:bg-warm-900 space-y-3">
                     <div>
-                      <div class="text-xs font-medium text-warm-700 dark:text-warm-300">Docker policy + retention</div>
-                      <div class="text-[10px] text-warm-500">
+                      <div class="text-[13px] font-medium text-warm-700 dark:text-warm-300">Docker policy + retention</div>
+                      <div class="text-[11px] text-slate-500 dark:text-warm-400">
                         Enforced by the local Docker handler. Remote and virtual repos keep policy on their member repos.
                       </div>
                     </div>
 
                     <label class="block">
-                      <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                      <span class="field-label block mb-1.5">
                         Immutable tag patterns
                       </span>
                       <input
                         type="text"
-                        class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                        class="input font-mono"
                         bind:value={immutableTagsText}
                         placeholder="prod, release-*, v*"
                       />
-                      <span class="block mt-1 text-[10px] text-warm-500 leading-relaxed">
+                      <span class="block mt-1 text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
                         Comma-separated shell-style tag patterns. Matching tags can be created once,
                         then cannot be moved to another digest or deleted. Do not include image paths.
                       </span>
@@ -1943,33 +2058,33 @@
 
                     <div class="grid grid-cols-2 gap-3">
                       <label class="block">
-                        <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                        <span class="field-label block mb-1.5">
                           GC grace seconds
                         </span>
                         <input
                           type="number"
                           min="0"
                           step="1"
-                          class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                          class="input font-mono"
                           bind:value={gcMinAgeSeconds}
                           placeholder="3600"
                         />
-                        <span class="block mt-1 text-[10px] text-warm-500">0 = default 1h</span>
+                        <span class="field-hint block mt-1">0 = default 1h</span>
                       </label>
 
                       <label class="block">
-                        <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                        <span class="field-label block mb-1.5">
                           Stale upload seconds
                         </span>
                         <input
                           type="number"
                           min="0"
                           step="1"
-                          class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                          class="input font-mono"
                           bind:value={abandonedUploadMaxAgeSeconds}
                           placeholder="86400"
                         />
-                        <span class="block mt-1 text-[10px] text-warm-500">0 = default 24h</span>
+                        <span class="field-hint block mt-1">0 = default 24h</span>
                       </label>
                     </div>
                   </div>
@@ -1977,14 +2092,14 @@
               </div>
             {:else if repoDraft.kind === 'remote'}
               <!-- ── Remote: upstream URL + cache storage + optional auth ── -->
-              <div class="rounded border border-warm-200 dark:border-warm-800 p-3 bg-warm-50/50 dark:bg-warm-950/30 space-y-3">
+              <div class="rounded border border-slate-200 dark:border-warm-700 p-3 bg-warm-50/50 dark:bg-warm-950/30 space-y-3">
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                    Upstream URL <span class="text-red-500">*</span>
+                  <span class="field-label block mb-1.5">
+                    Upstream URL <span class="text-vermilion-500">*</span>
                   </span>
                   <input
                     type="url"
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                    class="input font-mono"
                     bind:value={repoDraft.url}
                     placeholder={defaultUpstreamURL(repoDraft.type)}
                   />
@@ -1992,16 +2107,16 @@
 
                 <div class="grid grid-cols-2 gap-3">
                   <label class="block">
-                    <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                      Cache mount <span class="text-red-500">*</span>
+                    <span class="field-label block mb-1.5">
+                      Cache mount <span class="text-vermilion-500">*</span>
                     </span>
                     {#if rawMounts.length === 0}
-                      <div class="text-[11px] text-amber-700 dark:text-amber-400">
+                      <div class="text-[12px] text-amber-700 dark:text-amber-400">
                         No raw mounts configured. Add one under Settings → Raw mounts first.
                       </div>
                     {:else}
                       <select
-                        class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                        class="input font-mono"
                         bind:value={repoDraft.mount}
                       >
                         <option value="">— select a mount —</option>
@@ -2013,19 +2128,19 @@
                   </label>
 
                   <label class="block">
-                    <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                      Cache base path <span class="text-red-500">*</span>
+                    <span class="field-label block mb-1.5">
+                      Cache base path <span class="text-vermilion-500">*</span>
                     </span>
                     <input
                       type="text"
-                      class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="input font-mono"
                       bind:value={repoDraft.base_path}
                       placeholder={defaultCachePath(repoDraft.type)}
                     />
                   </label>
                 </div>
 
-                <span class="block -mt-1 text-[10px] text-warm-500 leading-relaxed">
+                <span class="block -mt-1 text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
                   Pulled artifacts are stored in this raw mount path and served from cache
                   on later reads. Use a dedicated cache path per remote repository.
                 </span>
@@ -2037,7 +2152,7 @@
                      button is hidden — operators publish first,
                      then probe. -->
                 {#if mode?.kind === 'edit-repository'}
-                  <div class="flex items-center gap-2 text-xs">
+                  <div class="flex items-center gap-2 text-[13px]">
                     <button
                       class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800 flex items-center gap-1 disabled:opacity-50"
                       onclick={runProbe}
@@ -2052,14 +2167,14 @@
                           ✓ {probeResult.status_code} · {probeResult.latency_ms} ms
                         </span>
                       {:else}
-                        <span class="text-red-500" title={probeResult.error}>
+                        <span class="text-vermilion-500" title={probeResult.error}>
                           ✗ {probeResult.status_code || 'error'}
                         </span>
                       {/if}
                     {/if}
                   </div>
                   {#if probeResult && probeResult.body_preview}
-                    <details class="text-[10px] text-warm-500">
+                    <details class="text-[11px] text-slate-500 dark:text-warm-400">
                       <summary class="cursor-pointer">Response preview</summary>
                       <pre class="mt-1 font-mono whitespace-pre-wrap break-all">{probeResult.body_preview}</pre>
                     </details>
@@ -2067,20 +2182,20 @@
                 {/if}
 
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                  <span class="field-label block mb-1.5">
                     Mutable cache TTL
                   </span>
                   <input
                     type="text"
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                    class="input font-mono"
                     bind:value={repoDraft.mutable_ttl}
                     placeholder={repoDraft.type === 'docker' ? '1h' : '5m'}
                   />
-                  <span class="block mt-1 text-[10px] text-warm-500 leading-relaxed">
+                  <span class="block mt-1 text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
                     {#if repoDraft.type === 'go'}
                       How long to cache <strong>mutable</strong> upstream responses — the version
                       list (<code class="font-mono">@v/list</code>) and latest pointer
-                      (<code class="font-mono">@latest</code>). Within the TTL pika serves the
+                      (<code class="font-mono">@latest</code>). Within the TTL kutu serves the
                       cached copy without hitting <code class="font-mono">proxy.golang.org</code>;
                       after it, the next request triggers a refresh. Immutable files
                       (<code class="font-mono">.info</code>, <code class="font-mono">.mod</code>,
@@ -2108,6 +2223,8 @@
                       How long to cache <strong>mutable</strong> sparse-index files. Downloaded
                       <code class="font-mono">.crate</code> archives are cached forever after
                       first fetch. Default: <code class="font-mono">5m</code>.
+                    {:else if repoDraft.type !== 'docker'}
+                      {protocol(repoDraft.type).ttlHint} Default: <code class="font-mono">5m</code>.
                     {:else}
                       How long to cache <strong>floating</strong> Docker tags (see the field
                       below). Blob layers and manifests-by-digest are immutable and cached
@@ -2124,21 +2241,21 @@
 
                 {#if repoDraft.type === 'docker'}
                   <label class="block">
-                    <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                    <span class="field-label block mb-1.5">
                       Floating tags
                     </span>
                     <input
                       type="text"
-                      class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="input font-mono"
                       bind:value={floatingTagsText}
                       placeholder="latest, main, master, dev, develop, nightly, edge, stable, canary"
                     />
-                    <span class="block mt-1 text-[10px] text-warm-500 leading-relaxed">
+                    <span class="block mt-1 text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
                       Comma-separated list of tag names treated as <strong>mutable</strong>.
-                      Pika re-resolves these tags through upstream every TTL window. Tags
+                      kutu re-resolves these tags through upstream every TTL window. Tags
                       <strong>not</strong> in this list (e.g. <code class="font-mono">v1.2.3</code>,
                       <code class="font-mono">2024-05-19</code>) are cached forever after the
-                      first successful resolve — once pika has the digest, it never asks
+                      first successful resolve — once kutu has the digest, it never asks
                       upstream again, even after a registry restart.
                       <br />
                       Leave empty to use the default list shown as placeholder. Use a single
@@ -2156,15 +2273,15 @@
                     checked={repoDraft.insecure_skip_verify === true}
                     onchange={(e) => repoDraft.insecure_skip_verify = (e.currentTarget as HTMLInputElement).checked}
                   />
-                  <span class="text-xs">Skip TLS verify (self-signed upstream only)</span>
+                  <span class="text-[13px]">Skip TLS verify (self-signed upstream only)</span>
                 </label>
 
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                  <span class="field-label block mb-1.5">
                     Upstream auth (optional)
                   </span>
                   <select
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                    class="input"
                     value={repoDraft.auth?.type ?? ''}
                     onchange={(e) => {
                       const v = (e.currentTarget as HTMLSelectElement).value;
@@ -2183,7 +2300,7 @@
                   <div class="grid grid-cols-2 gap-3">
                     <input
                       type="text"
-                      class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="input font-mono"
                       placeholder="username"
                       bind:value={repoDraft.auth.username}
                     />
@@ -2198,7 +2315,7 @@
                     <div class="relative">
                       <input
                         type={revealPassword ? 'text' : 'password'}
-                        class="w-full px-2 py-1 pr-7 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                        class="w-full px-2 py-1 pr-7 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[13px]"
                         placeholder="password"
                         bind:value={repoDraft.auth.password}
                       />
@@ -2216,7 +2333,7 @@
                   <div class="relative">
                     <input
                       type={revealToken ? 'text' : 'password'}
-                      class="w-full px-2 py-1 pr-7 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="w-full px-2 py-1 pr-7 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[13px]"
                       placeholder="token"
                       bind:value={repoDraft.auth.token}
                     />
@@ -2233,14 +2350,14 @@
                   <div class="grid grid-cols-2 gap-3">
                     <input
                       type="text"
-                      class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="input font-mono"
                       placeholder="X-Header-Name"
                       bind:value={repoDraft.auth.header}
                     />
                     <div class="relative">
                       <input
                         type={revealHeaderValue ? 'text' : 'password'}
-                        class="w-full px-2 py-1 pr-7 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                        class="w-full px-2 py-1 pr-7 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[13px]"
                         placeholder="value"
                         bind:value={repoDraft.auth.value}
                       />
@@ -2256,26 +2373,27 @@
                   </div>
                 {/if}
 
-                <p class="text-[10px] text-warm-500 leading-relaxed">
+                <p class="text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
                   Enter credentials directly. Secret values (password, token, header value) are
                   sealed with the at-rest encryption key before they are stored and are never
                   returned to non-admin API callers.
                 </p>
 
-                {#if repoDraft.type === 'go'}
-                  <!-- ── Prefix-routed upstreams (Go only) ── -->
-                  <div class="rounded border border-warm-200 dark:border-warm-800 p-3 bg-white dark:bg-warm-900 space-y-3">
+                {#if protocol(repoDraft.type).prefixUpstreams}
+                  <!-- ── Prefix-routed upstreams (go / npm / maven) ── -->
+                  <div class="rounded border border-slate-200 dark:border-warm-700 p-3 bg-white dark:bg-warm-900 space-y-3">
                     <div class="flex items-start justify-between gap-2">
                       <div>
-                        <div class="text-xs font-medium text-warm-700 dark:text-warm-300">Prefix-routed upstreams</div>
-                        <div class="text-[10px] text-warm-500 leading-relaxed">
-                          Route module paths to different upstreams. The longest matching prefix wins;
-                          modules matching no prefix fall back to the upstream URL above.
+                        <div class="text-[13px] font-medium text-warm-700 dark:text-warm-300">Prefix-routed upstreams</div>
+                        <div class="text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
+                          Route package names to different upstreams (e.g. <code class="font-mono">github.com/acme/</code>,
+                          <code class="font-mono">@acme/</code>, <code class="font-mono">com/acme/</code>). The longest matching
+                          prefix wins; everything else uses the upstream URL above.
                         </div>
                       </div>
                       <button
                         type="button"
-                        class="shrink-0 flex items-center gap-1 text-[11px] px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
+                        class="shrink-0 flex items-center gap-1 text-[12px] px-2 py-1 rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
                         onclick={addUpstream}
                       >
                         <Plus size={11} /> Add upstream
@@ -2283,17 +2401,17 @@
                     </div>
 
                     {#each repoDraft.upstreams ?? [] as up, i (i)}
-                      <div class="rounded border border-warm-200 dark:border-warm-800 p-2 space-y-2 bg-warm-50/50 dark:bg-warm-950/30">
+                      <div class="rounded border border-slate-200 dark:border-warm-700 p-2 space-y-2 bg-warm-50/50 dark:bg-warm-950/30">
                         <div class="flex items-center gap-2">
                           <input
                             type="text"
-                            class="flex-1 px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                            class="flex-1 px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[13px]"
                             placeholder="prefix, e.g. github.com/acme/"
                             bind:value={up.prefix}
                           />
                           <button
                             type="button"
-                            class="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400"
+                            class="p-1 rounded hover:bg-vermilion-100 dark:hover:bg-vermilion-900/40 text-vermilion-600 dark:text-vermilion-400"
                             title="Remove upstream"
                             onclick={() => removeUpstream(i)}
                           >
@@ -2303,13 +2421,13 @@
 
                         <input
                           type="url"
-                          class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                          class="input font-mono"
                           placeholder="https://goproxy.internal"
                           bind:value={up.url}
                         />
 
                         <select
-                          class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                          class="input"
                           value={up.auth?.type ?? ''}
                           onchange={(e) => setUpstreamAuthType(up, (e.currentTarget as HTMLSelectElement).value)}
                         >
@@ -2321,29 +2439,29 @@
 
                         {#if up.auth?.type === 'basic'}
                           <div class="grid grid-cols-2 gap-2">
-                            <input type="text" class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs" placeholder="username" bind:value={up.auth.username} />
-                            <input type="password" class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs" placeholder="password" bind:value={up.auth.password} />
+                            <input type="text" class="input font-mono" placeholder="username" bind:value={up.auth.username} />
+                            <input type="password" class="input font-mono" placeholder="password" bind:value={up.auth.password} />
                           </div>
                         {:else if up.auth?.type === 'bearer'}
-                          <input type="password" class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs" placeholder="token" bind:value={up.auth.token} />
+                          <input type="password" class="input font-mono" placeholder="token" bind:value={up.auth.token} />
                         {:else if up.auth?.type === 'header'}
                           <div class="grid grid-cols-2 gap-2">
-                            <input type="text" class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs" placeholder="X-Header-Name" bind:value={up.auth.header} />
-                            <input type="password" class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs" placeholder="value" bind:value={up.auth.value} />
+                            <input type="text" class="input font-mono" placeholder="X-Header-Name" bind:value={up.auth.header} />
+                            <input type="password" class="input font-mono" placeholder="value" bind:value={up.auth.value} />
                           </div>
                         {/if}
 
                         <details>
-                          <summary class="cursor-pointer text-[10px] text-warm-500 hover:text-warm-700 dark:hover:text-warm-300">
+                          <summary class="cursor-pointer text-[11px] text-slate-500 dark:text-warm-400 hover:text-warm-700 dark:hover:text-warm-300">
                             SSH private key (optional)
                           </summary>
                           <textarea
-                            class="mt-1 w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[11px]"
+                            class="mt-1 w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[12px]"
                             rows="3"
                             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
                             bind:value={up.ssh_key}
                           ></textarea>
-                          <span class="block mt-1 text-[10px] text-warm-500 leading-relaxed">
+                          <span class="block mt-1 text-[11px] text-slate-500 dark:text-warm-400 leading-relaxed">
                             Stored sealed for a future git-over-SSH fetch mode for private modules.
                             Not used by the current HTTP pull-through cache yet.
                           </span>
@@ -2352,7 +2470,7 @@
                     {/each}
 
                     {#if (repoDraft.upstreams ?? []).length === 0}
-                      <div class="text-[10px] text-warm-500">
+                      <div class="text-[11px] text-slate-500 dark:text-warm-400">
                         No prefix upstreams — every module uses the upstream URL above.
                       </div>
                     {/if}
@@ -2361,32 +2479,32 @@
               </div>
             {:else}
               <!-- ── Virtual: member list + default-local hint ── -->
-              <div class="rounded border border-warm-200 dark:border-warm-800 p-3 bg-warm-50/50 dark:bg-warm-950/30 space-y-3">
+              <div class="rounded border border-slate-200 dark:border-warm-700 p-3 bg-warm-50/50 dark:bg-warm-950/30 space-y-3">
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
-                    Members <span class="text-red-500">*</span>
+                  <span class="field-label block mb-1.5">
+                    Members <span class="text-vermilion-500">*</span>
                   </span>
                   <input
                     type="text"
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                    class="input font-mono"
                     bind:value={virtualMembersText}
                     placeholder="local-repo, proxy-cache"
                   />
-                  <span class="block mt-1 text-[10px] text-warm-500">
+                  <span class="field-hint block mt-1">
                     Comma-separated sibling repository names (within {modeNamespace(mode)}). Lookup tries them in order; first match wins.
                   </span>
                   {#if siblingRepoNames.length > 0}
-                    <span class="block mt-1 text-[10px] text-warm-500">
+                    <span class="field-hint block mt-1">
                       Available: <code class="font-mono">{siblingRepoNames.join(', ')}</code>
                     </span>
                   {/if}
                 </label>
 
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">Default local (hint)</span>
+                  <span class="field-label block mb-1.5">Default local (hint)</span>
                   <input
                     type="text"
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                    class="input font-mono"
                     bind:value={repoDraft.default_local}
                     placeholder="Optional — which local member receives writes"
                   />
@@ -2394,28 +2512,30 @@
               </div>
             {/if}
 
+            <RepoPolicyEditor bind:draft={repoDraft} />
+
             <!-- ── B6: common per-repo overrides ────────────────────
                  cors_origins and max_upload_size apply to any kind
                  (local/remote/virtual). Live below the kind-specific
                  fields so the form reads top-to-bottom: identity →
                  kind selector → kind-specific fields → common
                  overrides. -->
-            <details class="border-t border-warm-200 dark:border-warm-800 pt-3 mt-3">
-              <summary class="cursor-pointer text-xs font-medium text-warm-600 dark:text-warm-400 hover:text-warm-900 dark:hover:text-warm-100">
+            <details class="border-t border-slate-200 dark:border-warm-700 pt-3 mt-3">
+              <summary class="cursor-pointer text-[13px] font-medium text-warm-600 dark:text-warm-400 hover:text-warm-900 dark:hover:text-warm-100">
                 Advanced (CORS, upload size)
               </summary>
               <div class="space-y-3 mt-3">
                 <label class="block">
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                  <span class="field-label block mb-1.5">
                     CORS origins
                   </span>
                   <input
                     type="text"
-                    class="w-full px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                    class="input font-mono"
                     bind:value={corsOriginsText}
                     placeholder="https://app.example.com, *"
                   />
-                  <span class="block mt-1 text-[10px] text-warm-500">
+                  <span class="field-hint block mt-1">
                     Comma-separated origins allowed for browser-based clients.
                     Use <code class="font-mono">*</code> as a single entry for
                     permissive CORS. Empty disables CORS headers (server-default
@@ -2424,7 +2544,7 @@
                 </label>
 
                 <div>
-                  <span class="block text-xs font-medium text-warm-600 dark:text-warm-400 mb-1">
+                  <span class="field-label block mb-1.5">
                     Max upload size
                   </span>
                   <div class="flex items-center gap-2">
@@ -2432,20 +2552,20 @@
                       type="number"
                       min="0"
                       step="1"
-                      class="w-24 px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-xs"
+                      class="w-24 px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 font-mono text-[13px]"
                       bind:value={maxUploadValue}
                       placeholder="0"
                     />
                     <select
-                      class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-xs"
+                      class="px-2 py-1 rounded border border-warm-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-[13px]"
                       bind:value={maxUploadUnit}
                     >
                       <option value="MB">MB</option>
                       <option value="GB">GB</option>
                     </select>
-                    <span class="text-[10px] text-warm-500">0 = type default</span>
+                    <span class="text-[11px] text-slate-500 dark:text-warm-400">0 = type default</span>
                   </div>
-                  <span class="block mt-1 text-[10px] text-warm-500">
+                  <span class="field-hint block mt-1">
                     Caps the publish / push body size. Server-side defaults: NPM
                     200 MB, Docker (per-blob) varies by upload session.
                   </span>
@@ -2456,14 +2576,14 @@
 
       <div class="flex items-center justify-end gap-2 mt-4">
         <button
-          class="px-3 py-1 text-xs rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
+          class="px-3 py-1 text-[13px] rounded border border-warm-300 dark:border-warm-700 hover:bg-warm-100 dark:hover:bg-warm-800"
           onclick={cancelModal}
           disabled={saving}
         >
           Cancel
         </button>
         <button
-          class="px-3 py-1 text-xs rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50 flex items-center gap-1"
+          class="px-3 py-1 text-[13px] rounded bg-accent-500 hover:bg-accent-600 text-white disabled:opacity-50 flex items-center gap-1"
           onclick={saveRepository}
           disabled={saving}
         >
@@ -2478,6 +2598,20 @@
        overlays everything (namespace sidebar, repo list, detail
        column) instead of nesting inside the detail column where
        it would be clipped by the column's overflow rules. -->
+  <RegistrySearch
+    open={searchOpen}
+    onclose={() => (searchOpen = false)}
+    onpick={(hit) => {
+      searchOpen = false;
+      const ns = namespaces.find((n) => n.name === hit.namespace);
+      const r = ns?.repositories?.find((x) => x.name === hit.repo);
+      if (!ns || !r) return;
+      selectedNS = ns.name;
+      selectRepo(r);
+      openDetail(hit.name, r.type);
+    }}
+  />
+
   {#if detailPackage && selectedRepo && selectedNS}
     <PackageDetailPanel
       namespace={selectedNS}

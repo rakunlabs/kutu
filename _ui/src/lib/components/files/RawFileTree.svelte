@@ -16,16 +16,16 @@
  }
 </script>
 
-<div class="flex flex-col h-full bg-slate-50 dark:bg-warm-900 border-r border-slate-200 dark:border-warm-700 select-none">
+<div class="flex flex-col h-full bg-slate-50 dark:bg-warm-950/60 border-r border-slate-200 dark:border-warm-700 select-none">
   <!-- Header -->
-  <div class="flex items-center justify-between px-3 py-2 bg-slate-100 dark:bg-warm-800 border-b border-slate-200 dark:border-warm-700">
-  <span class="text-xs font-semibold text-gray-700 dark:text-warm-100 uppercase tracking-wide flex items-center gap-1.5">
-  <HardDrive size={12} class="text-brand-500" />
+  <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 dark:border-warm-700">
+  <span class="label-caps text-[11px] text-slate-500 dark:text-warm-400 flex items-center gap-1.5">
+  <HardDrive size={12} class="text-accent-600 dark:text-accent-300" />
   Files
   </span>
   <div class="flex gap-0.5">
   <button
-  class="flex items-center justify-center w-6 h-6 text-gray-500 dark:text-warm-200 bg-transparent border-none cursor-pointer hover:text-gray-800 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-warm-600 rounded"
+  class="btn btn-ghost btn-sm btn-icon !h-6 !w-6"
  onclick={refreshMounts}
  title="Refresh all"
  aria-label="Refresh all mounts"
@@ -42,7 +42,7 @@
  <RawFileTreeNode {node} />
  {/each}
  {:else}
- <div class="p-5 text-center text-gray-400 dark:text-slate-500 text-[13px]">No mounts configured</div>
+ <div class="p-5 text-center text-slate-500 dark:text-warm-400 text-[13px]">No mounts configured</div>
  {/if}
  </div>
 </div>

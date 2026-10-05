@@ -1,9 +1,7 @@
 // Package server wires kutu's runtime: it loads settings, builds the
-// raw-mount handler, the artifact-registry manager and the user-built
-// proxy manager, then serves the HTTP admin + data plane through ada.
-// There is no authentication — a capability-planting middleware marks
-// every request as fully capable so the checks inherited from pika are
-// satisfied.
+// raw-mount handler, the artifact-registry manager and the file-serving
+// manager, boots authentication, then serves the HTTP admin + data plane
+// through ada.
 package server
 
 import (
@@ -13,6 +11,7 @@ import (
 	"net/http"
 
 	"github.com/rakunlabs/ada"
+	"github.com/rakunlabs/ada/middleware/auth/session"
 	mcors "github.com/rakunlabs/ada/middleware/cors"
 	mlog "github.com/rakunlabs/ada/middleware/log"
 	mrecover "github.com/rakunlabs/ada/middleware/recover"
@@ -23,6 +22,7 @@ import (
 	"github.com/rakunlabs/kutu/internal/config"
 	"github.com/rakunlabs/kutu/internal/hook"
 	"github.com/rakunlabs/kutu/internal/server/api"
+	"github.com/rakunlabs/kutu/internal/server/authx"
 	"github.com/rakunlabs/kutu/internal/server/lockgate"
 	"github.com/rakunlabs/kutu/internal/server/serve"
 	"github.com/rakunlabs/kutu/internal/server/vhost"
@@ -107,41 +107,86 @@ func Start(ctx context.Context, cfg *config.Config, svc *service.Service, info a
 		mlog.Middleware(),
 		mtelemetry.Middleware(),
 		// Lock gate: 503 the /api/v1 surface while the at-rest key is
-		// initialized but not unlocked. No-op on fresh installs.
+		// initialized but not unlocked. Login stays reachable so an
+		// administrator can sign in and unlock.
 		lockgate.Middleware(svc.KeyManager()),
-		capabilityMiddleware, // kutu has no auth: every request is fully capable
-		actorMiddleware,      // capture the optional X-User header for audit
 	)
 
-	if err := api.Handle(server.Mux, svc, info, rawHandler, serveMgr, registryMgr, vhostMgr, dispatcher); err != nil {
+	// ── Authentication ──
+	authSettings := svc.GetAuthSettings(ctx)
+	cookie := cookieName(authSettings)
+	mgr := authx.New(authx.Deps{
+		Svc:          svc,
+		SessionStore: authx.NewSessionStore(svc, cookie),
+		BasePath:     "/",
+		CookieName:   cookie,
+		Version:      info.Version,
+	})
+	if err := mgr.Boot(ctx, authSettings); err != nil {
+		return fmt.Errorf("auth manager boot: %w", err)
+	}
+
+	// Brute-force protection on POST /login/pass/* and /login/register/*
+	// per client IP and per username.
+	var rl *service.AuthRateLimitSettings
+	if authSettings != nil {
+		rl = authSettings.RateLimit
+	}
+	rl = rl.WithDefaults()
+	trustedProxies := authx.ParseCIDRs(rl.TrustedProxyCIDRs)
+
+	mLogin := server.Group("", authx.LoginAudit(trustedProxies), authx.LoginGuard(rl, trustedProxies))
+	mgr.Mount(mLogin)
+
+	public := server.Group("")
+	data := server.Group("")
+	protected := server.Group("", noLoginRedirect, mgr.Require(), mgr.CapMiddleware(), actorMiddleware)
+
+	if err := api.Handle(ctx, api.Muxes{Public: public, Protected: protected, Data: data}, api.Deps{
+		Svc:            svc,
+		Info:           info,
+		Mgr:            mgr,
+		RawHandler:     rawHandler,
+		ServeMgr:       serveMgr,
+		RegistryMgr:    registryMgr,
+		VhostMgr:       vhostMgr,
+		Dispatcher:     dispatcher,
+		RateLimit:      rl,
+		TrustedProxies: trustedProxies,
+	}); err != nil {
 		return err
 	}
 
 	// Embedded SPA as the catch-all (registered last so API + data-plane
-	// routes take precedence).
-	if err := folderHandler(server.Mux); err != nil {
+	// routes take precedence). The SPA renders its own login screen.
+	if err := folderHandler(public); err != nil {
 		return fmt.Errorf("mount UI: %w", err)
 	}
 
 	return server.StartWithContext(ctx, cfg.Server.Addr())
 }
 
-// capabilityMiddleware plants the full capability set on every request.
-// kutu does not authenticate, so the capability checks copied from pika
-// always pass.
-func capabilityMiddleware(next http.Handler) http.Handler {
+// cookieName returns the session cookie name from the auth settings.
+func cookieName(s *service.AuthSettings) string {
+	if s != nil && s.Cookie.Name != "" {
+		return s.Cookie.Name
+	}
+	return "kutu_session"
+}
+
+// noLoginRedirect makes unauthenticated API calls answer 401 JSON instead
+// of a 303 to the login page; the SPA renders its own login screen.
+func noLoginRedirect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(service.WithAllCapabilities(r.Context())))
+		next.ServeHTTP(w, r.WithContext(session.SetDisableRedirect(r.Context(), true)))
 	})
 }
 
-// actorMiddleware threads the optional X-User request header into the
-// context so the storage layer can stamp updated_by and the registry
-// handlers can attribute hook events. kutu has no auth, so this is a
-// best-effort, caller-supplied attribution only.
+// actorMiddleware stamps the authenticated user on the context so the
+// storage layer's updated_by columns and hook events attribute changes.
 func actorMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if u := r.Header.Get("X-User"); u != "" {
+		if u := service.UserFromContext(r.Context()); u != "" {
 			r = r.WithContext(service.WithActor(r.Context(), u))
 		}
 		next.ServeHTTP(w, r)

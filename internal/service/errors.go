@@ -12,3 +12,7 @@ var (
 	ErrConflict     = errors.New("conflict")
 	ErrInternal     = errors.New("internal error")
 )
+
+// ErrPasskeyDisabled is returned by passkey operations when no WebAuthn
+// engine is configured.
+var ErrPasskeyDisabled = errors.New("passkey not configured")

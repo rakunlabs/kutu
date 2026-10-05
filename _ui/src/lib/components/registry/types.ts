@@ -17,7 +17,14 @@
 
 // ─── Registry type / kind discriminators ───
 
-export type RegistryType = 'go' | 'npm' | 'docker' | 'helm' | 'maven' | 'pypi' | 'cargo';
+export type RegistryType =
+  | 'go' | 'npm' | 'docker' | 'helm' | 'maven' | 'pypi' | 'cargo'
+  | 'generic' | 'nuget' | 'rubygems' | 'composer' | 'terraform' | 'pub' | 'swift'
+  | 'apt' | 'rpm' | 'alpine' | 'conda' | 'huggingface' | 'conan' | 'cran'
+  | 'vagrant' | 'ansible' | 'puppet' | 'chef' | 'cocoapods' | 'bower' | 'gitlfs' | 'p2';
+
+/** Types with a bespoke list endpoint + detail shape; every other type uses /entries + `generic` detail. */
+export const LEGACY_TYPES: RegistryType[] = ['go', 'npm', 'docker', 'helm', 'maven', 'pypi', 'cargo'];
 export type RegistryKind = 'local' | 'remote' | 'virtual';
 
 // ─── List shapes: settings tree ───
@@ -50,11 +57,37 @@ export type RegistryUpstream = {
 export type RegistryRetentionPolicy = {
   gc_min_age_seconds?: number;
   abandoned_upload_max_age_seconds?: number;
+  keep_last_versions?: number;
+  max_version_age_days?: number;
+  keep_patterns?: string[];
 };
 
 export type RegistryPolicy = {
   immutable_tags?: string[];
   retention?: RegistryRetentionPolicy;
+  include?: string[];
+  exclude?: string[];
+  immutable_versions?: boolean;
+  quota_bytes?: number;
+  quarantine_days?: number;
+  block_vulnerable?: boolean;
+  min_severity?: '' | 'low' | 'moderate' | 'high' | 'critical';
+  allowed_licenses?: string[];
+  denied_licenses?: string[];
+  block_unknown_license?: boolean;
+  require_signature?: boolean;
+};
+
+export type RegistryPrefetch = {
+  packages?: string[];
+  interval?: string;
+};
+
+export type RegistryReplication = {
+  source_url: string;
+  token?: string;
+  interval?: string;
+  disabled?: boolean;
 };
 
 /** Repository mirrors service.RegistryRepository on the wire. */
@@ -82,7 +115,47 @@ export type Repository = {
   cors_origins?: string[];
   max_upload_size?: number; // bytes (0 = type default)
   policy?: RegistryPolicy;
+  /** apt/rpm: armored OpenPGP private key; alpine: PEM RSA private key. */
+  signing_key?: string;
+  signing_key_name?: string;
+  prefetch?: RegistryPrefetch;
+  replication?: RegistryReplication;
 };
+
+/** PackageSummary mirrors registry.PackageSummary (GET …/entries). */
+export type PackageSummary = {
+  name: string;
+  versions?: string[];
+};
+
+export type SearchHit = {
+  namespace: string;
+  repo: string;
+  type: RegistryType;
+  kind: RegistryKind;
+  name: string;
+  versions?: string[];
+  latest?: string;
+};
+
+export type RegistryUsage = {
+  requests: number;
+  errors: number;
+  bytes_served: number;
+  since: string;
+  top_downloads?: { package: string; downloads: number }[];
+};
+
+export type Vulnerability = {
+  id: string;
+  summary?: string;
+  severity: string;
+  aliases?: string[];
+  fixed_in?: string[];
+  url?: string;
+};
+
+export type RetentionItem = { name: string; version: string; reason: string };
 
 /** Namespace mirrors service.RegistryNamespace on the wire. */
 export type Namespace = {
@@ -302,8 +375,29 @@ export type CargoCrateDetail = {
   versions?: CargoVersionDetail[];
 };
 
+export type GenericFile = { name: string; size?: number; sha256?: string };
+
+export type GenericVersionDetail = {
+  version: string;
+  published_at?: string;
+  size?: number;
+  yanked?: boolean;
+  files?: GenericFile[];
+  metadata?: Record<string, string>;
+};
+
+export type GenericPackageDetail = {
+  latest_version?: string;
+  description?: string;
+  homepage?: string;
+  license?: string;
+  metadata?: Record<string, string>;
+  versions?: GenericVersionDetail[];
+};
+
 export type PackageDetail = {
   type: RegistryType;
+  generic?: GenericPackageDetail;
   name: string;
   npm?: NPMPackageDetail;
   go?: GoModuleDetail;

@@ -25,10 +25,15 @@ import type {
   PackageDetail,
   PackageEntry,
   PyPIPackageEntry,
+  PackageSummary,
   ProbeResult,
   RegistryStats,
   RegistryType,
+  RegistryUsage,
   Repository,
+  RetentionItem,
+  SearchHit,
+  Vulnerability,
 } from '@/lib/components/registry/types';
 
 // ─── Envelope helpers ───
@@ -188,6 +193,97 @@ export async function listPyPIPackages(ns: string, repo: string): Promise<PyPIPa
 }
 export async function listCargoCrates(ns: string, repo: string): Promise<CargoCrateEntry[]> {
   return getJSON(`${basePath}/api/v1/registries/cargo/${enc(ns)}/${enc(repo)}/crates`);
+}
+
+/** GET /api/v1/registries/{type}/{ns}/{repo}/entries — protocol-neutral listing. */
+export async function listEntries(type: RegistryType, ns: string, repo: string): Promise<PackageSummary[]> {
+  return getJSON(`${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/entries`);
+}
+
+/** GET /api/v1/registries/search?q= — search every repository. */
+export async function searchPackages(q: string, limit = 100): Promise<SearchHit[]> {
+  return getJSON(`${basePath}/api/v1/registries/search?q=${enc(q)}&limit=${limit}`);
+}
+
+/** GET /api/v1/registries/{type}/{ns}/{repo}/usage — request / download counters. */
+export async function getUsage(type: RegistryType, ns: string, repo: string): Promise<RegistryUsage> {
+  return getJSON(`${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/usage`);
+}
+
+/** GET …/vulnerabilities/{name}?version= — OSV advisories for one version. */
+export async function getVulnerabilities(
+  type: RegistryType,
+  ns: string,
+  repo: string,
+  name: string,
+  version: string,
+): Promise<Vulnerability[]> {
+  return getJSON(
+    `${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/vulnerabilities/${pathTail(name)}?version=${enc(version)}`,
+  );
+}
+
+/** POST …/retention?dry_run= — plan or apply the repo's retention policy. */
+export async function runRetention(
+  type: RegistryType,
+  ns: string,
+  repo: string,
+  dryRun: boolean,
+): Promise<{ deletions: RetentionItem[]; deleted?: number; errors?: string[] }> {
+  return postJSON(`${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/retention?dry_run=${dryRun}`);
+}
+
+/** POST …/promote — copy name@version into another local repo of the same type. */
+export async function promoteVersion(
+  type: RegistryType,
+  ns: string,
+  repo: string,
+  body: { name: string; version: string; target_namespace?: string; target_repo: string },
+): Promise<{ ok: boolean }> {
+  return postJSON(`${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/promote`, body);
+}
+
+/** POST …/prefetch — warm a remote cache now. */
+export async function prefetchNow(
+  type: RegistryType,
+  ns: string,
+  repo: string,
+  packages?: string[],
+): Promise<{ errors?: string[] }> {
+  return postJSON(`${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/prefetch`, { packages: packages ?? [] });
+}
+
+/** POST …/replicate — run the replication pull now. */
+export async function replicateNow(
+  type: RegistryType,
+  ns: string,
+  repo: string,
+): Promise<{ files: number; bytes: number; skipped: number }> {
+  return postJSON(`${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/replicate`);
+}
+
+/** URL of the export archive (GET, downloads a tar.gz). */
+export function exportURL(type: RegistryType, ns: string, repo: string): string {
+  return `${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/export`;
+}
+
+/** POST …/import — upload an export archive into a local repo. */
+export async function importArchive(
+  type: RegistryType,
+  ns: string,
+  repo: string,
+  file: File,
+  overwrite: boolean,
+): Promise<{ files: number; bytes: number; skipped: number }> {
+  const resp = await fetch(
+    `${basePath}/api/v1/registries/${type}/${enc(ns)}/${enc(repo)}/import?overwrite=${overwrite}`,
+    { ...fetchOpts, method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body: file },
+  );
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new RegistryAPIError(resp.status, `HTTP ${resp.status}`, body);
+  }
+  return resp.json();
 }
 
 /** GET /api/v1/registries/{type}/{ns}/{repo}/stats. */

@@ -74,7 +74,7 @@ type ParsedPublish struct {
 	VersionMeta map[string]any // raw per-version metadata, ready to persist
 	TarballName string         // filename portion of dist.tarball
 	Tarball     []byte
-	IntegrityOK bool           // true when client-supplied integrity matched
+	IntegrityOK bool // true when client-supplied integrity matched
 	DistTags    map[string]string
 	Readme      string
 }

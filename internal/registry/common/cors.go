@@ -43,7 +43,7 @@ func ApplyCORS(w http.ResponseWriter, r *http.Request, allowlist []string) (hand
 
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, POST, DELETE, PATCH, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, X-Pika-Token, "+r.Header.Get("Access-Control-Request-Headers"))
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, X-Kutu-Token, "+r.Header.Get("Access-Control-Request-Headers"))
 	w.Header().Set("Access-Control-Expose-Headers", "ETag, Docker-Content-Digest, Content-Range")
 	w.Header().Set("Access-Control-Max-Age", "600")
 	w.Header().Set("Vary", appendVary(w.Header().Get("Vary"), "Origin"))

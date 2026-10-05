@@ -13,6 +13,11 @@
 
 import {
   Anchor,
+  Box,
+  Boxes,
+  Brain,
+  HardDrive,
+  Server,
   Cloud,
   Container,
   FileBox,
@@ -74,6 +79,12 @@ export function iconFor(type: RegistryType) {
     case 'maven': return Package;
     case 'pypi': return Package;
     case 'cargo': return Package;
+    case 'huggingface': return Brain;
+    case 'gitlfs': return HardDrive;
+    case 'terraform': case 'ansible': case 'puppet': case 'chef': return Boxes;
+    case 'apt': case 'rpm': case 'alpine': return Server;
+    case 'vagrant': return Box;
+    default: return Package;
   }
 }
 

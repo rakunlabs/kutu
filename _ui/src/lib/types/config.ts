@@ -1059,3 +1059,10 @@ export interface ServeStatus {
   shared_port?: boolean;
   error?: string;
 }
+
+// Capability descriptor returned by /api/v1/info
+export interface Capability {
+  key: string;
+  name: string;
+  description: string;
+}

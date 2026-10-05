@@ -10,6 +10,7 @@ import (
 
 	"github.com/rakunlabs/ada"
 
+	"github.com/rakunlabs/kutu/internal/registry"
 	"github.com/rakunlabs/kutu/internal/registry/common"
 	"github.com/rakunlabs/kutu/internal/server/vhost"
 	"github.com/rakunlabs/kutu/internal/service"
@@ -90,17 +91,17 @@ func (a *api) registryListenerHandler(ns, repo string) http.Handler {
 			return
 		}
 
-		// Same token-scope convention as /registries/*: scope is the
-		// repo-relative path, op derives from the method. kutu has no
-		// auth (ValidateToken is a no-op) but the contract is kept so
-		// the pika diff stays minimal.
-		scope := "registry/" + ns + "/" + repo + r.URL.Path
-		if tokenRaw := common.ExtractToken(r); tokenRaw != "" {
-			if err := a.svc.ValidateToken(ctx, tokenRaw, scope, operationFor(r.Method)); err != nil {
-				writeListenerError(w, http.StatusUnauthorized, err.Error())
-				return
-			}
+		docker := isDockerRequest(reg.Type(), r.URL.Path)
+		if docker && (r.URL.Path == "/v2/token" || r.URL.Path == "/v2/token/") {
+			a.serveDockerToken(w, r, "")
+			return
 		}
+		p, err := a.authorizeRegistry(r, ns, repo, r.URL.Path, operationFor(r.Method))
+		if err != nil {
+			writeRegistryAuthError(w, r, docker, "", err)
+			return
+		}
+		r = withPrincipal(r, p)
 
 		// The registry lives at the endpoint root: the URL-prefix hint
 		// used for absolute-URL reconstruction (npm tarball URLs,
@@ -109,7 +110,11 @@ func (a *api) registryListenerHandler(ns, repo string) http.Handler {
 		r2 := r.Clone(ctx)
 		r2.Header.Set("X-Pika-Registry-Prefix", "")
 
-		reg.ServeHTTP(w, r2)
+		if status, msg, ok := registry.CheckGate(reg, r2); !ok {
+			writeRegistryPolicyError(w, status, msg)
+			return
+		}
+		a.serveRegistryMetered(w, r2, reg)
 	})
 }
 

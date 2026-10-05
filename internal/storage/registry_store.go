@@ -240,6 +240,12 @@ func (s *Store) repoRecord(ctx context.Context, namespace string, repo *service.
 	// in the JSONB column.
 	body := *repo
 	body.Auth = nil
+	body.SigningKey = ""
+	if body.Replication != nil {
+		rep := *body.Replication
+		rep.Token = ""
+		body.Replication = &rep
+	}
 	if len(body.Upstreams) > 0 {
 		stripped := make([]service.RegistryUpstream, len(body.Upstreams))
 		for i := range body.Upstreams {
@@ -309,10 +315,12 @@ type upstreamSecret struct {
 // backward compatibility with rows written before per-upstream support)
 // plus an index-aligned list of per-upstream secrets.
 type repoSealedSecrets struct {
-	Password  string           `json:"password,omitempty"`
-	Token     string           `json:"token,omitempty"`
-	Value     string           `json:"value,omitempty"`
-	Upstreams []upstreamSecret `json:"upstreams,omitempty"`
+	SigningKey       string           `json:"signing_key,omitempty"`
+	ReplicationToken string           `json:"replication_token,omitempty"`
+	Password         string           `json:"password,omitempty"`
+	Token            string           `json:"token,omitempty"`
+	Value            string           `json:"value,omitempty"`
+	Upstreams        []upstreamSecret `json:"upstreams,omitempty"`
 }
 
 // sealRepoSecrets splits a repository's credentials into a non-secret
@@ -329,8 +337,11 @@ func (s *Store) sealRepoSecrets(repo *service.RegistryRepository) (authMeta any,
 		}
 	}
 
-	sec := repoSealedSecrets{}
-	hasSecret := false
+	sec := repoSealedSecrets{SigningKey: repo.SigningKey}
+	if repo.Replication != nil {
+		sec.ReplicationToken = repo.Replication.Token
+	}
+	hasSecret := sec.SigningKey != "" || sec.ReplicationToken != ""
 	if repo.Auth != nil {
 		sec.Password, sec.Token, sec.Value = repo.Auth.Password, repo.Auth.Token, repo.Auth.Value
 		if sec.Password != "" || sec.Token != "" || sec.Value != "" {
@@ -379,6 +390,11 @@ func (s *Store) openRepoSecrets(authRaw, sealed []byte, repo *service.RegistryRe
 		if raw, err := envelope.Open(s.mgr, sealed); err == nil {
 			_ = json.Unmarshal(raw, &sec)
 		}
+	}
+
+	repo.SigningKey = sec.SigningKey
+	if repo.Replication != nil {
+		repo.Replication.Token = sec.ReplicationToken
 	}
 
 	// Default upstream auth: present only when a meta blob was stored.

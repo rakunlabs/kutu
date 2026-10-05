@@ -28,12 +28,12 @@ import (
 // classifiedRequest summarises what kind of NPM operation the URL
 // describes. Handlers branch on Op and read the relevant fields.
 type classifiedRequest struct {
-	Op       string // "packument" | "tarball" | "publish" | "search" | "whoami" | "dist-tags" | "dist-tag-set" | "dist-tag-del" | ""
-	Pkg      string
-	File     string // tarball filename
-	Tag      string // dist-tag name (for set/del)
-	SearchQ  string
-	SearchN  int
+	Op      string // "packument" | "tarball" | "publish" | "search" | "whoami" | "dist-tags" | "dist-tag-set" | "dist-tag-del" | "audit" | ""
+	Pkg     string
+	File    string // tarball filename
+	Tag     string // dist-tag name (for set/del)
+	SearchQ string
+	SearchN int
 }
 
 // classify parses one URL path + HTTP method into a classifiedRequest.
@@ -77,6 +77,8 @@ func classify(method, p string) classifiedRequest {
 // classifyDash handles the "-/...." admin namespace.
 func classifyDash(method, p string) classifiedRequest {
 	switch {
+	case isAuditPath(p):
+		return classifiedRequest{Op: "audit"}
 	case p == "/-/whoami" && (method == http.MethodGet || method == http.MethodHead):
 		return classifiedRequest{Op: "whoami"}
 	case strings.HasPrefix(p, "/-/v1/search"):
@@ -155,6 +157,7 @@ func servePackumentFromStore(w http.ResponseWriter, r *http.Request, s *Store, n
 		writeNotFound(w, name+": "+err.Error())
 		return
 	}
+	body = rewritePackumentTarballs(body, inferPublicBase(r))
 	etag := common.EtagFor(string(body))
 	if common.MatchIfNoneMatch(r, etag) {
 		w.WriteHeader(http.StatusNotModified)

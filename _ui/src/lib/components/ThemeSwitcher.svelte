@@ -43,12 +43,12 @@
   // Base shape is a small square with slightly rounded corners — the
   // user explicitly asked for a square button (not a circle).
   const baseClasses =
-    "flex items-center justify-center w-7 h-7 rounded-md border cursor-pointer transition-colors";
+    "flex items-center justify-center w-7 h-7 rounded-[3px] border cursor-pointer transition-colors";
 
   const variantClasses = $derived(
     variant === "dark"
-      ? "bg-warm-700 border-warm-600 text-warm-200 hover:bg-warm-600 hover:text-white"
-      : "bg-white dark:bg-warm-900 border-slate-200 dark:border-warm-500 text-slate-600 dark:text-warm-200 hover:bg-slate-50 dark:hover:bg-warm-600 hover:text-slate-800 dark:hover:text-white",
+      ? "bg-transparent border-warm-700 text-warm-200 hover:border-warm-400 hover:text-white"
+      : "bg-white dark:bg-warm-900 border-slate-300 dark:border-warm-600 text-slate-600 dark:text-warm-200 hover:border-slate-500 dark:hover:border-warm-400 hover:text-slate-800 dark:hover:text-white",
   );
 </script>
 
@@ -56,7 +56,7 @@
   type="button"
   onclick={cycleTheme}
   title={`${themeLabel} (click to change)`}
-  aria-label={themeLabel}
+  aria-label={`${themeLabel}. Click to change`}
   class="{baseClasses} {variantClasses} {extraClass} cursor-pointer"
 >
   {#if prefsStore.app.theme === "light"}

@@ -19,8 +19,20 @@
 //	GET    /-/package/{pkg}/dist-tags          all dist-tags
 //	PUT    /-/package/{pkg}/dist-tags/{tag}    set dist-tag
 //	DELETE /-/package/{pkg}/dist-tags/{tag}    remove dist-tag
+//	POST   /-/npm/v1/security/advisories/bulk  npm audit (remote: proxied; local: {})
+//	POST   /-/npm/v1/security/audits/quick     legacy npm audit (same)
 //
-// Scoped packages
+// Remote repos route each request by package name across extra
+// upstreams (RegistryRepository.Upstreams): prefix "@acme" or "@acme/"
+// sends the whole scope to a private registry; everything else (and
+// the /-/ping probe) uses the default URL.
+//
+// Client configuration:
+//
+//	npm config set registry https://kutu.example.com/registries/{ns}/{repo}/
+//	npm config set //kutu.example.com/registries/{ns}/{repo}/:_authToken kutu_...
+//
+// # Scoped packages
 //
 // NPM scoped names look like "@scope/name". The URL encoding is
 // "/@scope%2Fname" or "/@scope/name" depending on the client; we

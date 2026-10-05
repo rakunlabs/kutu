@@ -5,9 +5,9 @@
 // Why a shared package
 //
 // The three protocols look like three different worlds on the wire,
-// but at pika's edge they all reduce to the same questions:
+// but at kutu's edge they all reduce to the same questions:
 //
-//   - "Did the caller present a valid pika token?"
+//   - "Did the caller present a valid kutu token?"
 //   - "Should I serve a cached metadata document or rebuild it?"
 //   - "Should this response be cached by the client?"
 //
@@ -47,17 +47,17 @@ const (
 	OpDelete = "delete"
 )
 
-// ExtractToken pulls a pika token out of an incoming registry
+// ExtractToken pulls a kutu token out of an incoming registry
 // request. Three header shapes are accepted, in this order:
 //
-//  1. `Authorization: Bearer <token>` — the canonical pika form, used
+//  1. `Authorization: Bearer <token>` — the canonical kutu form, used
 //     directly by Go (.netrc Basic translates to this when set to
 //     the literal "Bearer" username; npm CLI; cosign; ORAS).
 //  2. `Authorization: Basic <base64 user:token>` — npm's `_authToken`
 //     in `.npmrc` lands as Basic, and Go's `.netrc` Basic auth too.
 //     The token is read from the password slot; the username is
-//     ignored (pika tokens are self-identifying).
-//  3. `X-Pika-Token: <token>` — escape hatch for clients that
+//     ignored (kutu tokens are self-identifying).
+//  3. `X-Kutu-Token: <token>` — escape hatch for clients that
 //     can't set Authorization (rare; included for completeness).
 //
 // Returns the raw token text (without any "Bearer " prefix) or "" if
@@ -67,15 +67,27 @@ func ExtractToken(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	if tok := r.Header.Get("X-Pika-Token"); tok != "" {
+	if tok := r.Header.Get("X-Kutu-Token"); tok != "" {
+		return tok
+	}
+	// NuGet push sends its API key in X-NuGet-ApiKey.
+	if tok := r.Header.Get("X-NuGet-ApiKey"); tok != "" {
 		return tok
 	}
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
 		return ""
 	}
+	// RubyGems (and a few other CLIs) send the bare key with no scheme.
+	if strings.HasPrefix(auth, service.TokenPrefix) {
+		return strings.TrimSpace(auth)
+	}
 	if strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimSpace(auth[len("Bearer "):])
+	}
+	// ansible-galaxy sends `Authorization: Token <key>`.
+	if strings.HasPrefix(auth, "Token ") {
+		return strings.TrimSpace(auth[len("Token "):])
 	}
 	if strings.HasPrefix(auth, "Basic ") {
 		_, password, ok := r.BasicAuth()
@@ -87,7 +99,7 @@ func ExtractToken(r *http.Request) string {
 	return ""
 }
 
-// RequireToken extracts and validates a pika token in one step.
+// RequireToken extracts and validates a kutu token in one step.
 // The scope is the registry-specific path (e.g.
 // "registry/{ns}/{repo}/...") that token scopes are matched against;
 // op is OpRead/OpWrite/OpDelete.
@@ -98,7 +110,7 @@ func ExtractToken(r *http.Request) string {
 func RequireToken(ctx context.Context, v TokenValidator, r *http.Request, scope, op string) error {
 	tok := ExtractToken(r)
 	if tok == "" {
-		return fmt.Errorf("missing pika token: %w", service.ErrUnauthorized)
+		return fmt.Errorf("missing kutu token: %w", service.ErrUnauthorized)
 	}
 	if err := v.ValidateToken(ctx, tok, scope, op); err != nil {
 		return err

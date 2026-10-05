@@ -1,5 +1,6 @@
 /* stylelint-disable-next-line import-notation */
 @import 'tailwindcss';
+@import '@fontsource-variable/archivo/wdth.css';
 
 /* Tailwind v4 uses CSS-first config. Enable the `dark:` variant against
    a `.dark` class on a parent element. The prefs store toggles this
@@ -7,26 +8,66 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Brand palette.
-   Reference colors picked for this project:
-     #1D3557  deep navy           (brand-700, primary actions)
-     #EB5E28  burnt orange        (accent-600, highlights / call-outs)
-     #FF9F1C  amber               (accent-400, warning / attention)
-     #F95738  coral red           (accent-500, destructive / alert)
-   The full scales below are computed around those anchors so the
-   familiar Tailwind utility ergonomics (brand-50 … brand-900) still
-   hold. `brand-*` is the calm navy used as the default primary
-   action color (replaces the old "blue" everywhere); `accent-*` is
-   the warm orange used sparingly for emphasis (active pills,
-   selected file highlights) where the navy would feel too quiet.
+   Visual world: a reference manual open at a tabbed section.
+
+   - Every top-level area owns one full-strength section hue (Registries
+     oxide, Files teal, Settings ultramarine). `accent-*` is NOT a fixed
+     colour: it resolves to the hue of the section the element sits in,
+     via `[data-section]` on the app root. That is why the accent tokens
+     live in `@theme inline` — utilities must emit `var(--sec-*)` directly
+     so the cascade picks up the nearest section.
+   - Neutrals: `slate-*` / `gray-*` are the light "milk acetate" leaves and
+     ink; `warm-*` is the dark print-ink board. Both are warm-tinted so they
+     sit under the saturated section hues without going grey.
+   - Archivo (self-hosted, variable width axis) carries everything. Labels
+     use the condensed cut in caps (`.label-caps`); data stays system mono.
    ──────────────────────────────────────────────────────────────────────── */
 @theme {
-  /* Browser/OS fonts only: no font files are downloaded by the app. */
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --font-sans: 'Archivo Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
 
-  /* Navy — primary actions, focus rings, links. */
-  --color-brand-50:  #eaf0f7;
+  --color-white: #fffdf9;
+
+  /* Light leaves + ink. */
+  --color-slate-50: #faf8f3;
+  --color-slate-100: #f1ede4;
+  --color-slate-200: #e2dccf;
+  --color-slate-300: #cbc3b2;
+  --color-slate-400: #948c7c;
+  --color-slate-500: #6c665a;
+  --color-slate-600: #534e44;
+  --color-slate-700: #3f3b34;
+  --color-slate-800: #2a2823;
+  --color-slate-900: #1b1a17;
+  --color-slate-950: #100f0d;
+
+  --color-gray-50: #faf8f3;
+  --color-gray-100: #f1ede4;
+  --color-gray-200: #e2dccf;
+  --color-gray-300: #cbc3b2;
+  --color-gray-400: #948c7c;
+  --color-gray-500: #6c665a;
+  --color-gray-600: #534e44;
+  --color-gray-700: #3f3b34;
+  --color-gray-800: #2a2823;
+  --color-gray-900: #1b1a17;
+  --color-gray-950: #100f0d;
+
+  /* Dark print-ink board. */
+  --color-warm-50: #f4f1ea;
+  --color-warm-100: #e6e0d4;
+  --color-warm-200: #c9c2b5;
+  --color-warm-300: #aaa397;
+  --color-warm-400: #857f73;
+  --color-warm-500: #5f5a51;
+  --color-warm-600: #45413b;
+  --color-warm-700: #312e2a;
+  --color-warm-800: #22201d;
+  --color-warm-900: #191816;
+  --color-warm-950: #100f0e;
+
+  /* Fixed navy — kept for the few places that need a non-section colour. */
+  --color-brand-50: #eaf0f7;
   --color-brand-100: #cbd8e8;
   --color-brand-200: #94aece;
   --color-brand-300: #5d84b3;
@@ -38,44 +79,20 @@
   --color-brand-900: #0a1320;
   --color-brand-950: #060b14;
 
-  /* Teal — "selected / active" highlight. Used everywhere we previously
-     reached for a warm orange (file tree selection, tab indicators,
-     "you" row, capability picker chips, etc.). Cooler tone reads as
-     calmer next to the navy navbar and the warm-grey dark surfaces.
-     The 950 step is used for dark-mode tinted backgrounds
-     (`dark:bg-accent-950/30` on selected vault rows etc.) — Tailwind
-     drops utilities referencing undefined tokens silently, so every
-     palette needs its 950 explicitly defined here. */
-  --color-accent-50:  #e5f5f4;
-  --color-accent-100: #c2e9e6;
-  --color-accent-200: #84d3cd;
-  --color-accent-300: #46bdb5;
-  --color-accent-400: #1ca99e;
-  --color-accent-500: #0e9594;
-  --color-accent-600: #0c7a78;
-  --color-accent-700: #095e5c;
-  --color-accent-800: #074645;
-  --color-accent-900: #052f2e;
-  --color-accent-950: #031f1e;
+  /* Vermilion — errata: destructive actions and errors only. */
+  --color-vermilion-50: #fdecea;
+  --color-vermilion-100: #fbd3cd;
+  --color-vermilion-200: #f6a79c;
+  --color-vermilion-300: #f07a6a;
+  --color-vermilion-400: #e8543f;
+  --color-vermilion-500: #d63a24;
+  --color-vermilion-600: #b32d1b;
+  --color-vermilion-700: #8e2416;
+  --color-vermilion-800: #6a1b11;
+  --color-vermilion-900: #46120b;
+  --color-vermilion-950: #2d0b07;
 
-  /* Vermilion — destructive/primary call-to-action. Used in just a few
-     places where we want a true red punch (Render Preview, etc.). Kept
-     separate from `accent-*` so changes to the selection palette don't
-     accidentally restyle the destructive surfaces. */
-  --color-vermilion-50:  #fdecef;
-  --color-vermilion-100: #fbd0d7;
-  --color-vermilion-200: #f7a4af;
-  --color-vermilion-300: #f47887;
-  --color-vermilion-400: #f14c5f;
-  --color-vermilion-500: #ef233c;
-  --color-vermilion-600: #c71e32;
-  --color-vermilion-700: #9f1828;
-  --color-vermilion-800: #77121e;
-  --color-vermilion-900: #4f0c14;
-  --color-vermilion-950: #37080d;
-
-  /* Cool neutral — info pills, dark-mode card surfaces. */
-  --color-cool-50:  #edf2f4;
+  --color-cool-50: #edf2f4;
   --color-cool-100: #dce4e8;
   --color-cool-200: #c2cdd5;
   --color-cool-300: #a7b6c1;
@@ -87,32 +104,83 @@
   --color-cool-900: #181c22;
   --color-cool-950: #0d1015;
 
-  /* Warm neutral — anchored on #403D39 (warm-600) and #1a1a1a (warm-900).
-     Used as the dark-mode surface palette: warmer than slate-* and pairs
-     naturally with the burnt-orange accent (#EB5E28). The dark theme
-     prefers these over slate to avoid the cold "GitHub dark" look.
-     Scale runs 50…950 to match Tailwind v4 conventions:
-       - 900 (#1a1a1a) is the page/app background tier
-       - 950 (#0e0e0e) is the deepest "app canvas" tier used by
-         full-bleed surfaces (vault item editor / sidebar) where we
-         want the surface to read clearly recessed below the warm-900
-         page background.
-     If you find a class like `dark:bg-warm-950` not rendering, this
-     token block is the place to add the missing step. Tailwind drops
-     utilities that reference undefined custom colors silently — the
-     element falls back to its previous declaration (often `bg-white`).
-  */
-  --color-warm-50:  #f4f3f2;
-  --color-warm-100: #e3e1de;
-  --color-warm-200: #c4c0ba;
-  --color-warm-300: #a39e96;
-  --color-warm-400: #7a746a;
-  --color-warm-500: #58534b;
-  --color-warm-600: #403d39;
-  --color-warm-700: #2d2b29;
-  --color-warm-800: #222120;
-  --color-warm-900: #1a1a1a;
-  --color-warm-950: #0e0e0e;
+  /* The section hues, addressable directly (tab rail, previews). */
+  --color-oxide: #d95d22;
+  --color-teal: #0f8f87;
+  --color-plum: #9a3f8c;
+  --color-ultra: #3653d3;
+}
+
+@theme inline {
+  --color-accent-50: var(--sec-50);
+  --color-accent-100: var(--sec-100);
+  --color-accent-200: var(--sec-200);
+  --color-accent-300: var(--sec-300);
+  --color-accent-400: var(--sec-400);
+  --color-accent-500: var(--sec-500);
+  --color-accent-600: var(--sec-600);
+  --color-accent-700: var(--sec-700);
+  --color-accent-800: var(--sec-800);
+  --color-accent-900: var(--sec-900);
+  --color-accent-950: var(--sec-950);
+}
+
+/* Section hue scales. Default (no section) is Registries' oxide. */
+:root,
+[data-section='registries'] {
+  --sec-50: #fdf1ea;
+  --sec-100: #fbdcc9;
+  --sec-200: #f6b893;
+  --sec-300: #f0915c;
+  --sec-400: #e8733a;
+  --sec-500: #d95d22;
+  --sec-600: #b44a16;
+  --sec-700: #8f3a12;
+  --sec-800: #6c2c0f;
+  --sec-900: #4a1e0b;
+  --sec-950: #2e1207;
+}
+
+[data-section='files'] {
+  --sec-50: #e6f6f5;
+  --sec-100: #c3e9e6;
+  --sec-200: #8ad4ce;
+  --sec-300: #4fbcb4;
+  --sec-400: #22a59c;
+  --sec-500: #0f8f87;
+  --sec-600: #0b746d;
+  --sec-700: #095b56;
+  --sec-800: #07443f;
+  --sec-900: #052e2b;
+  --sec-950: #031d1b;
+}
+
+[data-section='listeners'] {
+  --sec-50: #f9edf7;
+  --sec-100: #f1d3ec;
+  --sec-200: #e3a8d9;
+  --sec-300: #d27cc4;
+  --sec-400: #bd58ad;
+  --sec-500: #9a3f8c;
+  --sec-600: #803374;
+  --sec-700: #66295d;
+  --sec-800: #4d1f46;
+  --sec-900: #34152f;
+  --sec-950: #210d1e;
+}
+
+[data-section='settings'] {
+  --sec-50: #ecf0fd;
+  --sec-100: #d3dcfa;
+  --sec-200: #a8b9f4;
+  --sec-300: #8aa0f0;
+  --sec-400: #6a84e8;
+  --sec-500: #3653d3;
+  --sec-600: #2c44b8;
+  --sec-700: #233693;
+  --sec-800: #1b296c;
+  --sec-900: #131d4a;
+  --sec-950: #0c122e;
 }
 
 html,
@@ -120,91 +188,69 @@ body {
   @apply h-full w-full;
 }
 
-/* Default page-level text color so anything rendered OUTSIDE the App
-   shell's `text-slate-*` div still inherits a sensible value.
-
-   Background:
-   - App.svelte's `{:else}` branch wraps the routed UI in
-     `text-slate-800 dark:text-slate-100`. That handles 99% of the
-     tree.
-   - Full-screen overlays mounted at the App root level (UnlockScreen,
-     and any future portal-style modal) sit OUTSIDE that wrapper,
-     so they inherit from <body>, which the browser leaves at its
-     UA default (`CanvasText` / black).
-   - The form-element `color: inherit` rule below relies on a usable
-     ancestor color. Without this default the rule cheerfully
-     inherits black-on-dark — exactly the "input text is unreadable
-     on the locked screen" bug.
-
-   Setting it once on <body> means every escape hatch (overlays,
-   teleported dialogs, future portals) gets the right text color for
-   free, and component-level Tailwind classes still override it
-   wherever a designer wants a different tone. */
 body {
-  color: rgb(30 41 59); /* slate-800 */
+  color: var(--color-slate-800);
+  background: var(--color-slate-100);
   font-family: var(--font-sans);
+  font-size: 14px;
+  font-feature-settings: 'tnum' 0;
+  -webkit-font-smoothing: antialiased;
 }
+
 .dark body {
-  color: rgb(241 245 249); /* slate-100 */
+  color: var(--color-warm-100);
+  background: var(--color-warm-900);
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Form-element color inheritance (dark mode fix).
+/* Data is measured: mono and tables get tabular figures. */
+.font-mono,
+code,
+pre,
+table {
+  font-variant-numeric: tabular-nums;
+}
 
-   <input>, <textarea>, and <select> do NOT inherit `color` from their
-   ancestor by browser default — each one gets a built-in black-ish
-   default (e.g. `-webkit-text-fill-color: black` on some Chromiums,
-   `CanvasText` on Firefox). That's fine on a white background but
-   illegible on the warm-950 dark surfaces the vault uses
-   (`dark:bg-warm-950` etc.), which is why vault password / search /
-   tag inputs rendered as black-on-near-black in dark mode.
+::selection {
+  background: var(--sec-200);
+  color: var(--color-slate-900);
+}
 
-   Forcing `color: inherit` on these elements means they pick up the
-   App-level `text-slate-100` in dark mode (App.svelte:64) and
-   `text-slate-800` in light mode automatically. Existing components
-   that already specify `dark:text-...` on the input still win
-   because of the cascade specificity of utility classes.
+.dark ::selection {
+  background: var(--sec-800);
+  color: var(--color-warm-50);
+}
 
-   `::placeholder` doesn't inherit either; we tone it down so it
-   reads as muted rather than the same color as live input text. */
+:focus-visible {
+  outline: 2px solid var(--sec-500);
+  outline-offset: 2px;
+}
+
 input,
 textarea,
 select {
   color: inherit;
-}
-input::placeholder,
-textarea::placeholder {
-  color: rgb(148 163 184); /* slate-400 — works on both themes */
-  opacity: 1;
-}
-.dark input::placeholder,
-.dark textarea::placeholder {
-  color: rgb(100 116 139); /* slate-500 */
+  caret-color: var(--sec-500);
+  accent-color: var(--sec-500);
 }
 
-/* Safari/iOS quirk: -webkit-text-fill-color overrides `color`
-   inside <input>/<textarea>. Reset it so our inherit takes effect.
-   Without this, autofilled credentials show in the platform's
-   yellow-on-yellow regardless of our dark theme. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-slate-400);
+  opacity: 1;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: var(--color-warm-400);
+}
+
+/* Safari/iOS quirk: -webkit-text-fill-color overrides `color`. */
 input,
 textarea {
   -webkit-text-fill-color: inherit;
 }
 
-/* Chrome / Edge / Safari autofill override.
-
-   When the browser autofills a saved credential, it injects its own
-   user-agent style: black text on a pale blue/yellow background that
-   ignores `color`, `background`, and any Tailwind class on the
-   element. The standard workaround is a giant inset box-shadow (which
-   IS honoured during autofill) plus an explicit text-fill-color.
-
-   We split light/dark so the autofilled field still reads correctly
-   under both themes. The shadow color matches the surrounding input
-   bg (white / warm-700) so the autofilled state is visually
-   indistinguishable from a manually-typed value — without this, a
-   user landing on the locked screen with a saved server key sees a
-   stark light rectangle with black text against the dark card. */
+/* Browser autofill ignores our colours; repaint it with an inset shadow. */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus,
@@ -213,10 +259,10 @@ textarea:-webkit-autofill,
 textarea:-webkit-autofill:hover,
 textarea:-webkit-autofill:focus,
 textarea:-webkit-autofill:active {
-  -webkit-text-fill-color: rgb(30 41 59); /* slate-800 (light mode) */
-  -webkit-box-shadow: 0 0 0 1000px #ffffff inset;
-  caret-color: rgb(30 41 59);
-  transition: background-color 9999s ease-in-out 0s; /* defeat the autofill fade-in */
+  -webkit-text-fill-color: var(--color-slate-800);
+  -webkit-box-shadow: 0 0 0 1000px var(--color-white) inset;
+  caret-color: var(--color-slate-800);
+  transition: background-color 9999s ease-in-out 0s;
 }
 
 .dark input:-webkit-autofill,
@@ -227,23 +273,19 @@ textarea:-webkit-autofill:active {
 .dark textarea:-webkit-autofill:hover,
 .dark textarea:-webkit-autofill:focus,
 .dark textarea:-webkit-autofill:active {
-  -webkit-text-fill-color: #f1f5f9; /* slate-100 — matches dark:text-slate-100 used across forms */
-  -webkit-box-shadow: 0 0 0 1000px #1a1a1a inset; /* warm-900 — matches dark:bg-warm-900 used by Login/Unlock inputs */
-  caret-color: #f1f5f9;
+  -webkit-text-fill-color: var(--color-warm-50);
+  -webkit-box-shadow: 0 0 0 1000px var(--color-warm-900) inset;
+  caret-color: var(--color-warm-50);
 }
 
-/* Scrollbar styling */
+/* Scrollbars: thin ink on the leaf, never default grey. */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #555 transparent;
+  scrollbar-color: var(--color-slate-300) transparent;
 }
 
-.dark *::-webkit-scrollbar-thumb {
-  background: #444;
-}
-
-.dark *::-webkit-scrollbar-thumb:hover {
-  background: #666;
+.dark * {
+  scrollbar-color: var(--color-warm-600) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -251,29 +293,378 @@ textarea:-webkit-autofill:active {
   height: 8px;
 }
 
-*::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-*::-webkit-scrollbar-thumb {
-  background: #555;
-  border-radius: 4px;
-}
-
-*::-webkit-scrollbar-thumb:hover {
-  background: #777;
-}
-
+*::-webkit-scrollbar-track,
 *::-webkit-scrollbar-corner {
   background: transparent;
 }
 
+*::-webkit-scrollbar-thumb {
+  background: var(--color-slate-300);
+  border-radius: 4px;
+}
+
+.dark *::-webkit-scrollbar-thumb {
+  background: var(--color-warm-600);
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
-   Flat black-tape mask widget for masked config values.
-   Used by _ui/src/lib/components/config/maskExtension.ts (CodeMirror).
-   Pure 2D: solid black rectangle, slight skew so it still reads as a strip
-   of tape, no border, no rounded corners, no depth.
-   ────────────────────────────────────────────────────────────────────────── */
+   Shared component vocabulary. Every screen uses these instead of
+   re-declaring button / input / badge class strings.
+   ──────────────────────────────────────────────────────────────────────── */
+@layer components {
+  /* Condensed tracked caps: the manual's section-head voice. */
+  .label-caps {
+    font-stretch: 68%;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    height: 2rem;
+    padding: 0 0.75rem;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 90ms steps(2), color 90ms steps(2), border-color 90ms steps(2);
+  }
+
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .btn-sm {
+    height: 1.75rem;
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .btn-icon {
+    width: 2rem;
+    padding: 0;
+  }
+
+  .btn-sm.btn-icon {
+    width: 1.75rem;
+  }
+
+  .btn-primary {
+    background: var(--sec-600);
+    color: var(--color-white);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: var(--sec-700);
+  }
+
+  .dark .btn-primary {
+    background: var(--sec-500);
+    color: #fff;
+  }
+
+  .dark .btn-primary:hover:not(:disabled) {
+    background: var(--sec-400);
+    color: var(--color-warm-950);
+  }
+
+  .btn-secondary {
+    background: var(--color-white);
+    border-color: var(--color-slate-300);
+    color: var(--color-slate-800);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    border-color: var(--color-slate-800);
+  }
+
+  .dark .btn-secondary {
+    background: transparent;
+    border-color: var(--color-warm-600);
+    color: var(--color-warm-100);
+  }
+
+  .dark .btn-secondary:hover:not(:disabled) {
+    border-color: var(--color-warm-200);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--color-slate-600);
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--color-slate-200);
+    color: var(--color-slate-900);
+  }
+
+  .dark .btn-ghost {
+    color: var(--color-warm-200);
+  }
+
+  .dark .btn-ghost:hover:not(:disabled) {
+    background: var(--color-warm-700);
+    color: var(--color-warm-50);
+  }
+
+  .btn-danger {
+    background: var(--color-vermilion-600);
+    color: #fff;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: var(--color-vermilion-700);
+  }
+
+  .btn-danger-ghost {
+    background: transparent;
+    color: var(--color-vermilion-600);
+  }
+
+  .btn-danger-ghost:hover:not(:disabled) {
+    background: var(--color-vermilion-50);
+  }
+
+  .dark .btn-danger-ghost {
+    color: var(--color-vermilion-300);
+  }
+
+  .dark .btn-danger-ghost:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--color-vermilion-900) 60%, transparent);
+  }
+
+  .input {
+    width: 100%;
+    height: 2rem;
+    padding: 0 0.625rem;
+    border-radius: 3px;
+    border: 1px solid var(--color-slate-300);
+    background: var(--color-white);
+    font-size: 0.8125rem;
+    transition: border-color 90ms steps(2);
+  }
+
+  textarea.input {
+    height: auto;
+    padding: 0.5rem 0.625rem;
+    line-height: 1.45;
+  }
+
+  .input:hover:not(:disabled) {
+    border-color: var(--color-slate-400);
+  }
+
+  .input:focus {
+    outline: none;
+    border-color: var(--sec-500);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--sec-500) 18%, transparent);
+  }
+
+  .input:disabled {
+    background: var(--color-slate-100);
+    color: var(--color-slate-500);
+    cursor: not-allowed;
+  }
+
+  .dark .input {
+    background: var(--color-warm-950);
+    border-color: var(--color-warm-600);
+  }
+
+  .dark .input:hover:not(:disabled) {
+    border-color: var(--color-warm-400);
+  }
+
+  .dark .input:disabled {
+    background: var(--color-warm-800);
+    color: var(--color-warm-400);
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    min-width: 0;
+  }
+
+  .field-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-slate-700);
+  }
+
+  .dark .field-label {
+    color: var(--color-warm-200);
+  }
+
+  .field-hint {
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: var(--color-slate-500);
+  }
+
+  .dark .field-hint {
+    color: var(--color-warm-400);
+  }
+
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--color-slate-700);
+    cursor: pointer;
+  }
+
+  .dark .check {
+    color: var(--color-warm-100);
+  }
+
+  .check input {
+    width: 0.9375rem;
+    height: 0.9375rem;
+  }
+
+  /* Status mark: a filled or hollow dot plus a word, never colour alone. */
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .status::before {
+    content: '';
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: currentColor;
+  }
+
+  .status-ok { color: #2f7d4f; }
+  .status-warn { color: #a86a00; }
+  .status-err { color: var(--color-vermilion-600); }
+  .status-off { color: var(--color-slate-500); }
+  .status-off::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+  .dark .status-ok { color: #5cc68a; }
+  .dark .status-warn { color: #f0b545; }
+  .dark .status-err { color: var(--color-vermilion-300); }
+  .dark .status-off { color: var(--color-warm-400); }
+
+  /* Neutral tag: a ruled label like a field on a spec sheet. */
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    height: 1.25rem;
+    padding: 0 0.375rem;
+    border: 1px solid var(--color-slate-300);
+    border-radius: 2px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    font-stretch: 68%;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-slate-600);
+    white-space: nowrap;
+  }
+
+  .dark .tag {
+    border-color: var(--color-warm-600);
+    color: var(--color-warm-200);
+  }
+
+  /* A leaf: the ruled panel content sits on, above the section board. */
+  .leaf {
+    background: var(--color-white);
+    border: 1px solid var(--color-slate-300);
+    border-radius: 3px;
+  }
+
+  .dark .leaf {
+    background: var(--color-warm-800);
+    border-color: var(--color-warm-700);
+  }
+
+  /* Selectable list row. Selection is a punched mark at the left edge
+     plus a tinted ground, never colour alone. */
+  .sel {
+    position: relative;
+    transition: background-color 90ms steps(2);
+  }
+
+  .sel:hover {
+    background: var(--color-slate-100);
+  }
+
+  .dark .sel:hover {
+    background: var(--color-warm-800);
+  }
+
+  .sel.is-sel {
+    background: var(--sec-50);
+    color: var(--color-slate-900);
+  }
+
+  .dark .sel.is-sel {
+    background: color-mix(in oklab, var(--sec-900) 55%, var(--color-warm-900));
+    color: var(--color-warm-50);
+  }
+
+  .sel.is-sel::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 3px;
+    height: 60%;
+    max-height: 1.5rem;
+    transform: translateY(-50%);
+    border-radius: 0 2px 2px 0;
+    background: var(--sec-500);
+  }
+
+  /* Metadata cells inside a ruled grid (title-block). The grid sits 1px
+     past the leaf's right/bottom edge so the cells' rules never double
+     up with the leaf border. */
+  .meta {
+    margin-bottom: 1rem;
+  }
+
+  .meta > .cell {
+    padding: 0.625rem 0.875rem;
+    font-size: 0.8125rem;
+    min-width: 0;
+    margin: 0 -1px -1px 0;
+    border-right: 1px solid var(--color-slate-200);
+    border-bottom: 1px solid var(--color-slate-200);
+  }
+
+  .dark .meta > .cell {
+    border-color: var(--color-warm-700);
+  }
+
+  .meta > .cell > :last-child {
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Flat black-tape mask widget for masked config values (CodeMirror).
+   ──────────────────────────────────────────────────────────────────────── */
 .cm-mask {
   display: inline-block;
   padding: 1px 8px;
@@ -283,7 +674,7 @@ textarea:-webkit-autofill:active {
   text-align: center;
   cursor: pointer;
   user-select: none;
-  color: transparent; /* hide the bullets that give us width */
+  color: transparent;
   background: #000;
   transform: skew(-3deg);
   transition: transform 120ms ease;
@@ -303,11 +694,19 @@ textarea:-webkit-autofill:active {
   outline-offset: 2px;
 }
 
-/* Brief flash after Ctrl/⌘+click copies the underlying value. */
 .cm-mask--copied {
-  background: #facc15; /* yellow-400 */
+  background: #facc15;
 }
 
 .codemirror-wrapper {
   height: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
 }

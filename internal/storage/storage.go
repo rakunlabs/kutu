@@ -157,8 +157,8 @@ func (s *Store) SetMeta(ctx context.Context, key string, value any) error {
 
 // ── helpers ──
 
-// actor returns the request actor (from the X-User header, threaded via
-// context) for the updated_by audit column. Empty when unset.
+// actor returns the authenticated user (threaded via context) for the
+// updated_by audit column. Empty when unset.
 func actor(ctx context.Context) string {
 	return service.ActorFromContext(ctx)
 }

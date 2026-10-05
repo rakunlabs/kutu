@@ -255,6 +255,7 @@ func (a *api) reloadRegistry(ctx context.Context) {
 	}
 	rs := a.svc.GetRegistrySettings(ctx)
 	a.registryMgr.Reload(ctx, rs)
+	a.syncRegistrySchedules()
 	// Dedicated listeners resolve their target repo per request, but a
 	// re-publish keeps their vhost bindings in sync (e.g. feature flag
 	// flips, listener-list edits routed through postSettings).
@@ -307,20 +308,18 @@ func (a *api) serveRegistry(c *ada.Context) error {
 		return nil
 	}
 
-	// Build the scope string for token validation. Mirrors the
-	// "raw/{mount}/{path}" convention so token scope globs read
-	// uniformly across raw mounts and registries.
-	scope := "registry/" + ns + "/" + repo + rest
-	op := operationFor(c.Request.Method)
-
-	// kutu has no authentication. ValidateToken is a no-op that always
-	// succeeds; a request without a token is served anonymously.
-	tokenRaw := common.ExtractToken(c.Request)
-	if tokenRaw != "" {
-		if err := a.svc.ValidateToken(c.Request.Context(), tokenRaw, scope, op); err != nil {
-			return err
-		}
+	prefix := "/registries/" + ns + "/" + repo
+	docker := isDockerRequest(reg.Type(), rest)
+	if docker && (rest == "/v2/token" || rest == "/v2/token/") {
+		a.serveDockerToken(c.Response, c.Request, prefix)
+		return nil
 	}
+	p, err := a.authorizeRegistry(c.Request, ns, repo, rest, operationFor(c.Request.Method))
+	if err != nil {
+		writeRegistryAuthError(c.Response, c.Request, docker, prefix, err)
+		return nil
+	}
+	c.Request = withPrincipal(c.Request, p)
 
 	// Strip the prefix that was matched and hand the request to the
 	// Registry. ServeHTTP sees a path like "/@v/list" (Go) or
@@ -332,10 +331,21 @@ func (a *api) serveRegistry(c *ada.Context) error {
 	// reconstruct the pika-facing public base. The hint is a
 	// pika-internal contract, not a wire format; client-supplied
 	// headers of the same name are overwritten.
-	r.Header.Set("X-Pika-Registry-Prefix", "/registries/"+ns+"/"+repo)
+	r.Header.Set("X-Pika-Registry-Prefix", prefix)
 
-	reg.ServeHTTP(c.Response, r)
+	if status, msg, ok := registry.CheckGate(reg, r); !ok {
+		writeRegistryPolicyError(c.Response, status, msg)
+		return nil
+	}
+	a.serveRegistryMetered(c.Response, r, reg)
 	return nil
+}
+
+// writeRegistryPolicyError writes a policy rejection.
+func writeRegistryPolicyError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
 }
 
 // serveNPMCDN is the direct data-plane entry for CDN-style package
@@ -375,12 +385,9 @@ func (a *api) serveNPMCDN(c *ada.Context) error {
 		return nil
 	}
 
-	scope := "registry/" + ns + "/" + repo + rest
-	tokenRaw := common.ExtractToken(c.Request)
-	if tokenRaw != "" {
-		if err := a.svc.ValidateToken(c.Request.Context(), tokenRaw, scope, common.OpRead); err != nil {
-			return err
-		}
+	if _, err := a.authorizeRegistry(c.Request, ns, repo, rest, common.OpRead); err != nil {
+		writeRegistryAuthError(c.Response, c.Request, false, "", err)
+		return nil
 	}
 
 	asset, err := npm.ParseCDNAssetPath(rest)
@@ -471,8 +478,44 @@ func (a *api) listRegistryNamespaces(c *ada.Context) error {
 	if rs == nil {
 		rs = &service.RegistrySettings{}
 	}
-	includeSecrets := service.CapabilitiesFromContext(c.Request.Context()).Has(service.CapRegistryAdmin)
-	return c.SetStatus(http.StatusOK).SendJSON(registrySettingsForResponse(rs, includeSecrets))
+	ctx := c.Request.Context()
+	includeSecrets := service.CapabilitiesFromContext(ctx).Has(service.CapRegistryAdmin)
+	return c.SetStatus(http.StatusOK).SendJSON(registrySettingsForResponse(visibleRegistrySettings(ctx, rs), includeSecrets))
+}
+
+// repoVisible reports whether the caller may see a repository: registry
+// admins see everything, others need registry.read on "<ns>/<repo>".
+func repoVisible(ctx context.Context, ns, repo string) bool {
+	caps := service.CapabilitiesFromContext(ctx)
+	if caps.Has(service.CapRegistryAdmin) {
+		return true
+	}
+	return caps.Has(service.CapRegistryRead) &&
+		service.CapabilityPatternsFromContext(ctx).AllowsAncestor(service.CapRegistryRead, ns+"/"+repo)
+}
+
+// visibleRegistrySettings drops repositories (and then-empty namespaces)
+// the caller cannot read.
+func visibleRegistrySettings(ctx context.Context, rs *service.RegistrySettings) *service.RegistrySettings {
+	if service.CapabilitiesFromContext(ctx).Has(service.CapRegistryAdmin) ||
+		len(service.CapabilityPatternsFromContext(ctx)[service.CapRegistryRead]) == 0 {
+		return rs
+	}
+	out := &service.RegistrySettings{Disabled: rs.Disabled}
+	for _, ns := range rs.Namespaces {
+		var repos []service.RegistryRepository
+		for _, r := range ns.Repositories {
+			if repoVisible(ctx, ns.Name, r.Name) {
+				repos = append(repos, r)
+			}
+		}
+		if len(repos) == 0 {
+			continue
+		}
+		ns.Repositories = repos
+		out.Namespaces = append(out.Namespaces, ns)
+	}
+	return out
 }
 
 const redactedRegistrySecret = "[redacted]"
@@ -508,6 +551,21 @@ func registryRepositoryForResponse(repo service.RegistryRepository, includeSecre
 	out.FloatingTags = cloneStrings(repo.FloatingTags)
 	out.CORSOrigins = cloneStrings(repo.CORSOrigins)
 	out.Policy = cloneRegistryPolicy(repo.Policy)
+	if !includeSecrets && repo.SigningKey != "" {
+		out.SigningKey = redactedRegistrySecret
+	}
+	if repo.Prefetch != nil {
+		pf := *repo.Prefetch
+		pf.Packages = cloneStrings(repo.Prefetch.Packages)
+		out.Prefetch = &pf
+	}
+	if repo.Replication != nil {
+		rep := *repo.Replication
+		if !includeSecrets && rep.Token != "" {
+			rep.Token = redactedRegistrySecret
+		}
+		out.Replication = &rep
+	}
 	if repo.Auth != nil {
 		auth := *repo.Auth
 		if !includeSecrets {
@@ -539,11 +597,16 @@ func cloneRegistryPolicy(in *service.RegistryPolicy) *service.RegistryPolicy {
 	if in == nil {
 		return nil
 	}
-	out := &service.RegistryPolicy{
-		ImmutableTags: cloneStrings(in.ImmutableTags),
-	}
+	cp := *in
+	out := &cp
+	out.ImmutableTags = cloneStrings(in.ImmutableTags)
+	out.Include = cloneStrings(in.Include)
+	out.Exclude = cloneStrings(in.Exclude)
+	out.AllowedLicenses = cloneStrings(in.AllowedLicenses)
+	out.DeniedLicenses = cloneStrings(in.DeniedLicenses)
 	if in.Retention != nil {
 		ret := *in.Retention
+		ret.KeepPatterns = cloneStrings(in.Retention.KeepPatterns)
 		out.Retention = &ret
 	}
 	return out
@@ -741,6 +804,9 @@ func (a *api) listRegistryRepos(c *ada.Context) error {
 	}
 	out := make([]service.RegistryRepositoryRow, 0, len(rows))
 	for _, row := range rows {
+		if !repoVisible(c.Request.Context(), row.Namespace, row.Name) {
+			continue
+		}
 		out = append(out, service.RegistryRepositoryRow{
 			Namespace:          row.Namespace,
 			RegistryRepository: registryRepositoryForResponse(row.RegistryRepository, false),
@@ -1156,6 +1222,32 @@ func (a *api) listRegistryCargoCrates(c *ada.Context) error {
 	return c.SetStatus(http.StatusOK).SendJSON(out)
 }
 
+// listRegistryEntries is the protocol-neutral package listing for
+// every registry implementing registry.PackageLister.
+// URL: GET /api/v1/registries/{type}/{ns}/{repo}/entries.
+func (a *api) listRegistryEntriesFor(typ string) func(*ada.Context) error {
+	return func(c *ada.Context) error { return a.listRegistryEntries(c, typ) }
+}
+
+func (a *api) listRegistryEntries(c *ada.Context, typ string) error {
+	reg, ns, repo, err := a.resolveRegistry(c, typ)
+	if err != nil {
+		return err
+	}
+	lister, ok := reg.(registry.PackageLister)
+	if !ok {
+		return fmt.Errorf("package listing not supported for %s/%s: %w", ns, repo, service.ErrBadRequest)
+	}
+	out, err := lister.ListPackages(c.Request.Context())
+	if err != nil {
+		return fmt.Errorf("list packages: %w", err)
+	}
+	if out == nil {
+		out = []registry.PackageSummary{}
+	}
+	return c.SetStatus(http.StatusOK).SendJSON(out)
+}
+
 // listRegistryNPMPackages returns the package/version tree for an
 // NPM registry repo. Mirrors listRegistryGoModules in shape and
 // gating; URL: /api/v1/registries/npm/{ns}/{repo}/packages.
@@ -1403,7 +1495,18 @@ func (a *api) deleteRegistryPackageArtifact(c *ada.Context, expectedType string)
 		subject = name + "@" + version
 
 	default:
-		return fmt.Errorf("registry type %q does not support delete: %w", reg.Type(), service.ErrBadRequest)
+		deleter, ok := reg.(registry.VersionDeleter)
+		if !ok {
+			return fmt.Errorf("registry type %q (kind=%s) does not support delete: %w", reg.Type(), reg.Kind(), service.ErrBadRequest)
+		}
+		version, err := requiredQuery(q.Get("version"), "version")
+		if err != nil {
+			return err
+		}
+		if err := deleter.DeleteVersion(c.Request.Context(), name, version); err != nil {
+			return mapRegistryDeleteError(name+"@"+version, err)
+		}
+		subject = name + "@" + version
 	}
 
 	a.emitRegistryEvent(hook.Event{
@@ -1685,7 +1788,7 @@ func (a *api) emitRegistryEvent(event hook.Event) {
 	d.Emit(event)
 }
 
-// emitRegistryEventCtx stamps the request actor (X-User) on the event
+// emitRegistryEventCtx stamps the authenticated user on the event
 // so the hook/event log records who made the config change, then emits.
 func (a *api) emitRegistryEventCtx(ctx context.Context, event hook.Event) {
 	event.User = service.ActorFromContext(ctx)

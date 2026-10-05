@@ -1,121 +1,177 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import { link } from "svelte-spa-router";
-  import active from "svelte-spa-router/active";
-  import { Boxes, FolderTree, Lock, Settings, User } from "lucide-svelte";
+  import { link, router, push } from "svelte-spa-router";
+  import { Boxes, ChevronDown, FolderTree, Lock, LockOpen, LogOut, RadioTower, Settings, ShieldCheck, User } from "lucide-svelte";
   import ThemeSwitcher from "@/lib/components/ThemeSwitcher.svelte";
   import { appStore } from "@/lib/store/store.svelte";
-  import { userStore } from "@/lib/store/user.svelte";
 
-  const nav = [
-    { href: "/registries", match: /^\/(registries)?$/, label: "Registries", icon: Boxes },
-    { href: "/files", match: "/files", label: "Files", icon: FolderTree },
-    { href: "/settings", match: "/settings", label: "Settings", icon: Settings },
+  // Index tabs. Each section owns one hue; the active tab steps down
+  // into the section board strip below the header (the signature move).
+  // Settings is open to everyone because account security lives there.
+  const allNav = [
+    { href: "/registries", key: "registries", label: "Registries", icon: Boxes, hue: "var(--color-oxide)", perm: "registry.read" },
+    { href: "/files", key: "files", label: "Files", icon: FolderTree, hue: "var(--color-teal)", perm: "raw.read" },
+    { href: "/listeners", key: "listeners", label: "Listeners", icon: RadioTower, hue: "var(--color-plum)", perm: "registry.admin" },
+    { href: "/settings", key: "settings", label: "Settings", icon: Settings, hue: "var(--color-ultra)", perm: "" },
   ];
+  const nav = $derived(allNav.filter((n) => !n.perm || appStore.hasPermission(n.perm)));
 
-  // X-User pill: click to edit the audit actor sent with every request.
-  let editing = $state(false);
-  let draft = $state("");
-  let inputEl = $state<HTMLInputElement | null>(null);
+  const current = $derived.by(() => {
+    const loc = router.location ?? "/";
+    if (loc.startsWith("/files")) return "files";
+    if (loc.startsWith("/listeners")) return "listeners";
+    if (loc.startsWith("/settings")) return "settings";
+    return "registries";
+  });
 
-  async function startEdit() {
-    draft = userStore.user;
-    editing = true;
-    await tick();
-    inputEl?.focus();
-    inputEl?.select();
+  const username = $derived(appStore.info?.user || appStore.identity?.name || appStore.identity?.subject || "Account");
+
+  let menuOpen = $state(false);
+  let menuEl = $state<HTMLDivElement | null>(null);
+
+  function onWindowClick(e: MouseEvent) {
+    if (menuOpen && menuEl && !menuEl.contains(e.target as Node)) menuOpen = false;
   }
 
-  function commit() {
-    userStore.setUser(draft);
-    editing = false;
+  function onWindowKey(e: KeyboardEvent) {
+    if (menuOpen && e.key === "Escape") menuOpen = false;
   }
 
-  function onKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      commit();
-    } else if (e.key === "Escape") {
-      // Reset the draft so the commit-on-blur is a no-op.
-      draft = userStore.user;
-      editing = false;
-    }
+  function goSecurity() {
+    menuOpen = false;
+    push("/settings/security");
+  }
+
+  async function signOut() {
+    menuOpen = false;
+    await appStore.logout();
   }
 </script>
 
-<header
-  class="flex items-center gap-1 h-10 bg-warm-900 text-white border-b border-warm-700 px-4 shrink-0"
->
-  <a
-    href="/"
-    use:link
-    class="flex items-center gap-2 mr-6 font-bold tracking-wide text-white"
-  >
-    <Boxes size={18} color="#EF233C" />
-    <span class="text-sm">kutu</span>
-  </a>
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKey} />
 
-  <nav class="flex items-center gap-1">
-    {#each nav as item (item.href)}
-      {@const Icon = item.icon}
-      <a
-        href={item.href}
-        use:link
-        use:active={{ path: item.match, className: "nav-active" }}
-        class="nav-link flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium no-underline transition-colors text-warm-200 hover:text-white hover:bg-warm-700"
-      >
-        <Icon size={14} />
-        {item.label}
-      </a>
-    {/each}
-  </nav>
+<header class="shrink-0 bg-warm-950 text-warm-100">
+  <div class="flex items-end h-12 px-3 sm:px-4 gap-2">
+    <a href="/" use:link class="flex items-center gap-2 self-center mr-2 sm:mr-5 text-warm-50" aria-label="kutu home">
+      <Boxes size={18} color="#EF233C" />
+      <span class="text-[15px] font-bold tracking-wide" style="font-stretch: 112%">kutu</span>
+    </a>
 
-  <div class="ml-auto flex items-center gap-2 text-warm-300">
-    {#if appStore.info?.key_initialized}
-      <span
-        class="flex items-center gap-1 text-xs {appStore.info?.key_unlocked
-          ? 'text-emerald-400'
-          : 'text-amber-400'}"
-        title={appStore.info?.key_unlocked ? "encryption unlocked" : "encryption locked"}
-      >
-        <Lock size={13} />
-      </span>
-    {/if}
+    <nav class="flex items-end gap-1 h-full overflow-hidden" aria-label="Sections">
+      {#each nav as item (item.href)}
+        {@const Icon = item.icon}
+        {@const on = current === item.key}
+        <a
+          href={item.href}
+          use:link
+          aria-current={on ? "page" : undefined}
+          class="tab label-caps flex items-center gap-1.5 px-3 sm:px-3.5 text-[12px] rounded-t-[3px] no-underline {on ? 'is-on' : ''}"
+          style="--hue: {item.hue}"
+        >
+          <Icon size={14} class="shrink-0" />
+          <span class="sr-only sm:not-sr-only">{item.label}</span>
+        </a>
+      {/each}
+    </nav>
 
-    <!-- X-User: the audit actor stamped on every mutation. Editable
-         because kutu has no login. -->
-    {#if editing}
-      <input
-        bind:this={inputEl}
-        bind:value={draft}
-        onkeydown={onKeydown}
-        onblur={commit}
-        placeholder="username"
-        class="w-32 px-2 py-1 rounded text-xs font-medium bg-warm-800 text-warm-100 border border-warm-600 placeholder-warm-400 focus:outline-none focus:ring-1 focus:ring-accent-500"
-      />
-    {:else}
-      <button
-        type="button"
-        onclick={startEdit}
-        title="Set the X-User sent with requests (audit attribution)"
-        class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-warm-700 hover:bg-warm-600 cursor-pointer {userStore.user
-          ? 'text-warm-100'
-          : 'text-warm-400'}"
-      >
-        <User size={14} />
-        {userStore.user || "Set user"}
-      </button>
-    {/if}
+    <div class="ml-auto flex items-center gap-2 self-center">
+      {#if appStore.info?.key_initialized}
+        {@const unlocked = appStore.info?.key_unlocked}
+        <span
+          class="hidden md:inline-flex items-center gap-1.5 text-[12px] font-medium {unlocked ? 'text-emerald-300' : 'text-amber-300'}"
+          title={unlocked ? "At-rest encryption is unlocked" : "At-rest encryption is locked"}
+        >
+          {#if unlocked}<LockOpen size={13} />{:else}<Lock size={13} />{/if}
+          {unlocked ? "Unlocked" : "Locked"}
+        </span>
+      {/if}
 
-    <ThemeSwitcher variant="dark" />
+      <div class="relative" bind:this={menuEl}>
+        <button
+          type="button"
+          onclick={() => (menuOpen = !menuOpen)}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          class="flex items-center gap-1.5 h-7 px-2.5 rounded-[3px] text-[12px] font-medium border border-warm-700 hover:border-warm-400 text-warm-50 cursor-pointer"
+        >
+          <User size={13} />
+          <span class="hidden sm:inline max-w-32 truncate">{username}</span>
+          {#if appStore.info?.is_superadmin}
+            <span class="hidden sm:inline-flex label-caps text-[11px] leading-none px-1 py-0.5 rounded-[2px] border border-warm-500 text-warm-200">superadmin</span>
+          {/if}
+          <ChevronDown size={12} class="text-warm-300" />
+        </button>
+        {#if menuOpen}
+          <div
+            role="menu"
+            class="menu absolute right-0 top-full mt-1.5 z-50 min-w-48 py-1 rounded-[3px] border border-slate-300 dark:border-warm-700 bg-white dark:bg-warm-800 text-slate-800 dark:text-warm-100"
+          >
+            <div class="px-3 py-2 border-b border-slate-200 dark:border-warm-700">
+              <div class="label-caps text-[11px] text-slate-500 dark:text-warm-400">Signed in as</div>
+              <div class="text-[13px] font-semibold truncate">{username}</div>
+              {#if appStore.info?.is_superadmin}<span class="tag mt-1">superadmin</span>{/if}
+            </div>
+            {#if appStore.info?.account_security_available}
+              <button type="button" role="menuitem" class="item" onclick={goSecurity}>
+                <ShieldCheck size={14} /> Account security
+              </button>
+            {/if}
+            <button type="button" role="menuitem" class="item" onclick={signOut}>
+              <LogOut size={14} /> Sign out
+            </button>
+          </div>
+        {/if}
+      </div>
+
+      <ThemeSwitcher variant="dark" />
+    </div>
   </div>
+  <!-- The section board: the active tab's hue, full width. -->
+  <div class="h-2" style="background: var(--sec-500)"></div>
 </header>
 
 <style>
-  /* Active nav entry — pika's filled-accent selection (bg-accent-600,
-     white text). The navbar is a permanently-dark warm-900 bar, so no
-     light-mode variant is needed. */
-  :global(.nav-link.nav-active) {
-    background-color: var(--color-accent-600);
+  .menu {
+    box-shadow: 0 8px 24px -6px rgb(0 0 0 / 0.3);
+  }
+
+  .item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .item:hover {
+    background: var(--color-slate-100);
+  }
+
+  :global(.dark) .item:hover {
+    background: var(--color-warm-700);
+  }
+
+  .tab {
+    height: 2.5rem;
+    margin-bottom: -1px;
+    color: var(--color-warm-300);
+    border: 1px solid transparent;
+    border-bottom: 0;
+    transform: translateY(0.375rem);
+    transition: transform 90ms steps(2), background-color 90ms steps(2), color 90ms steps(2);
+  }
+
+  .tab:hover {
+    color: var(--color-warm-50);
+    background: color-mix(in oklab, var(--hue) 22%, transparent);
+  }
+
+  /* Active: the tab steps up and becomes the section board. */
+  .tab.is-on {
+    transform: translateY(0);
+    background: var(--hue);
     color: #fff;
   }
 </style>

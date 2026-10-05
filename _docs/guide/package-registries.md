@@ -16,12 +16,36 @@ All registry types use the same admin model: **namespace → repository → kind
 | Type | Used for | Typical clients |
 | ---- | -------- | --------------- |
 | `go` | Go module proxy/cache | `go env GOPROXY=...`, `go get` |
-| `npm` | JavaScript packages | `npm`, `pnpm`, `yarn`, Proxy CDN reads |
-| `docker` | Docker/OCI images | `docker`, `podman`, `oras` |
+| `npm` | JavaScript packages | `npm`, `pnpm`, `yarn`, `npm audit`, Proxy CDN reads |
+| `docker` | Docker/OCI images | `docker`, `podman`, `oras`, `cosign` |
 | `helm` | Classic Helm chart repositories | `helm repo add`, `helm pull` |
-| `maven` | JVM artifacts in Maven layout | Maven, Gradle, sbt |
-| `pypi` | Python packages | `pip`, `twine`, Poetry |
-| `cargo` | Rust crates with sparse index | `cargo` |
+| `maven` | JVM artifacts in Maven layout (checksums, SNAPSHOTs) | Maven, Gradle, sbt |
+| `pypi` | Python packages (PEP 503/691/658/592, JSON API) | `pip`, `uv`, `twine`, Poetry |
+| `cargo` | Rust crates (sparse index + web API) | `cargo publish/yank/search` |
+| `generic` | Versioned raw files (`/{pkg}/{version}/{file}`) | `curl`, CI pipelines |
+| `nuget` | .NET packages (V3) | `dotnet`, `nuget`, Chocolatey 2.x |
+| `rubygems` | Ruby gems (compact index) | `gem`, `bundler` |
+| `composer` | PHP packages (Composer v2) | `composer` |
+| `terraform` | Terraform/OpenTofu modules and providers | `terraform`, `tofu` (dedicated listener) |
+| `pub` | Dart / Flutter packages | `dart pub` (HTTPS required for auth) |
+| `swift` | Swift Package Registry (SE-0292) | `swift package-registry` |
+| `apt` | Debian/Ubuntu repositories (signed) | `apt` |
+| `rpm` | YUM/DNF repositories (signed repomd) | `dnf`, `yum` |
+| `alpine` | Alpine apk repositories (signed APKINDEX) | `apk` |
+| `conda` | Conda channels | `conda`, `mamba`, `pixi` |
+| `huggingface` | Hugging Face Hub model/dataset mirror | `HF_ENDPOINT`, `huggingface-cli`, `transformers` |
+| `conan` | C/C++ packages (Conan 2) | `conan` |
+| `cran` | R packages | `install.packages` |
+| `vagrant` | Vagrant boxes | `vagrant box add` |
+| `ansible` | Ansible Galaxy collections | `ansible-galaxy` |
+| `puppet` | Puppet Forge modules | `puppet module`, r10k |
+| `chef` | Chef Supermarket cookbooks | Berkshelf |
+| `cocoapods` | CocoaPods CDN spec repo | `pod` |
+| `bower` | Bower registry | `bower` |
+| `gitlfs` | Git LFS objects (batch API + locks) | `git lfs` |
+| `p2` | Eclipse p2 update sites | Eclipse, Tycho |
+
+Every repository page in the UI shows a copy-paste **Client setup** snippet for its type.
 
 | Kind | Meaning | Notes |
 | ---- | ------- | ----- |
@@ -33,7 +57,7 @@ Use the **Registries** page in the UI for day-to-day management. Use **Settings 
 
 ## Dedicated listeners and virtual hosts
 
-The main server exposes repositories below `/registries/{namespace}/{repo}/...`. When a client needs the protocol at the host root, or a repository needs its own port, open **Registries → Listeners** and publish that repository through a dedicated listener.
+The main server exposes repositories below `/registries/{namespace}/{repo}/...`. When a client needs the protocol at the host root, or a repository needs its own port, open **Listeners → Registry** and publish that repository through a dedicated listener.
 
 This is especially useful for Docker and OCI clients, which always request `/v2/...` at the endpoint root:
 
@@ -262,6 +286,43 @@ Remote NPM repos fetch from upstream lazily:
 - Tarballs and explicit-version CDN assets are treated as immutable once cached.
 
 If upstream metadata changes and you need to refresh immediately, use the registry cache purge action in the UI or `POST /api/v1/registries/{type}/{namespace}/{repo}/purge`.
+
+## Repository policies
+
+Every repository accepts an optional `policy` block. Read-side rules are enforced on every data-plane request, including requests that reach a member through a virtual repository.
+
+| Field | Applies to | Effect |
+| ----- | ---------- | ------ |
+| `include` / `exclude` | all kinds | Package-name patterns (`path.Match`; `**` matches any depth). Exclude wins; a non-empty include list is an allowlist. Also blocks publishing names outside the list. |
+| `quarantine_days` | all kinds | Hides versions published less than N days ago. |
+| `block_vulnerable`, `min_severity` | all kinds | Refuses versions with OSV.dev advisories (go, npm, maven, pypi, cargo, nuget, rubygems, composer, pub, swift, cran, conan). Fails open when OSV is unreachable. |
+| `allowed_licenses`, `denied_licenses`, `block_unknown_license` | all kinds | SPDX-aware license gate. |
+| `require_signature` | docker | Tag pulls need a cosign or notation signature. |
+| `immutable_versions` | local | Rejects re-publishing an existing version. |
+| `quota_bytes` | local | Rejects pushes beyond the size limit. |
+| `retention.keep_last_versions`, `retention.max_version_age_days`, `retention.keep_patterns` | local | Used by `POST …/retention?dry_run=` (never deletes a package's newest version). |
+
+Local `apt` / `rpm` repositories accept an ASCII-armored OpenPGP `signing_key`; local `alpine` repositories accept a PEM RSA `signing_key` (+ `signing_key_name`). Keys are sealed with the at-rest key.
+
+## Operations
+
+All endpoints live under `/api/v1/registries/{type}/{namespace}/{repo}`:
+
+| Endpoint | Purpose |
+| -------- | ------- |
+| `GET …/entries` | Protocol-neutral package listing. |
+| `GET …/usage` | Request, error and byte counters plus top downloads since restart. |
+| `GET …/vulnerabilities/{name}?version=` | OSV advisories for one version. |
+| `POST …/retention?dry_run=true\|false` | Plan or apply the retention policy. |
+| `POST …/promote` | Copy `{name, version}` into another local repo of the same type (`target_repo`, optional `target_namespace`). |
+| `GET …/export[?since=RFC3339]` | Stream a verifiable tar.gz of the repository storage (full or incremental). |
+| `POST …/import?overwrite=` | Load an export archive into a local repo (air-gap transfer, restore). |
+| `POST …/replicate` | Pull now from `replication.source_url` (another kutu's export endpoint). Scheduled by `replication.interval`. |
+| `POST …/prefetch` | Warm a remote cache now. Scheduled by `prefetch.packages` + `prefetch.interval`. |
+
+`GET /api/v1/registries/search?q=` searches package names across every readable repository, and `GET /api/v1/registries/metrics` serves Prometheus counters (`kutu_registry_requests_total`, `kutu_registry_response_bytes_total`, `kutu_registry_package_downloads_total`).
+
+Prefix-routed `upstreams` work on `go`, `npm` (scopes such as `@acme/`) and `maven` (group paths such as `com/acme/`) remotes.
 
 ## Common failures
 

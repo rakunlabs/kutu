@@ -53,16 +53,16 @@ func TestExtractToken_Basic(t *testing.T) {
 
 func TestExtractToken_XPikaToken(t *testing.T) {
 	r := httptest.NewRequest("GET", "/x", nil)
-	r.Header.Set("X-Pika-Token", "header-token")
+	r.Header.Set("X-Kutu-Token", "header-token")
 	if got := ExtractToken(r); got != "header-token" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestExtractToken_XPikaTokenPriorityOverAuth(t *testing.T) {
-	// X-Pika-Token wins when both are set.
+	// X-Kutu-Token wins when both are set.
 	r := httptest.NewRequest("GET", "/x", nil)
-	r.Header.Set("X-Pika-Token", "winner")
+	r.Header.Set("X-Kutu-Token", "winner")
 	r.Header.Set("Authorization", "Bearer loser")
 	if got := ExtractToken(r); got != "winner" {
 		t.Fatalf("got %q", got)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -395,43 +396,86 @@ func mapFSError(err error) error {
 	return err
 }
 
-// getRaw serves raw files with either an API token (Authorization: Bearer)
-// or a UI session cookie.
+// getRaw serves a raw file or directory listing. Accepts an API token
+// (Authorization: Bearer / Basic), Basic username+password, or the UI
+// session cookie. Listing a directory is allowed on ancestors of a
+// permitted path so scoped users can navigate down to it.
 func (a *api) getRaw(c *ada.Context) error {
-	subKey := c.Request.PathValue("*")
-	tokenScope := "raw/" + subKey
-
-	if err := a.authBearerOrSession(c, tokenScope, "read", service.CapRawRead, subKey); err != nil {
-		return err
+	path := c.Request.PathValue("*")
+	p, err := a.authorizeRaw(c, service.CapRawRead, path, true)
+	if err != nil {
+		return a.rawAuthError(c, err)
 	}
-
+	c.Request = withPrincipal(c.Request, p)
 	return a.rawHandler.serveRaw(c)
 }
 
-// putRaw handles authenticated file uploads via either API token or session.
+// putRaw uploads a file.
 func (a *api) putRaw(c *ada.Context) error {
-	subKey := c.Request.PathValue("*")
-	tokenScope := "raw/" + subKey
-
-	if err := a.authBearerOrSession(c, tokenScope, "write", service.CapRawWrite, subKey); err != nil {
-		return err
+	p, err := a.authorizeRaw(c, service.CapRawWrite, c.Request.PathValue("*"), false)
+	if err != nil {
+		return a.rawAuthError(c, err)
 	}
-
+	c.Request = withPrincipal(c.Request, p)
 	return a.rawHandler.writeFile(c)
 }
 
-// deleteRaw handles authenticated file deletion via either API token or session.
+// deleteRaw deletes a file. raw.write covers deletes.
 func (a *api) deleteRaw(c *ada.Context) error {
-	subKey := c.Request.PathValue("*")
-	tokenScope := "raw/" + subKey
-
-	// CapRawWrite covers both write and delete on raw mounts (see
-	// capabilities.go: "Upload, delete, rename, copy and move raw files").
-	if err := a.authBearerOrSession(c, tokenScope, "delete", service.CapRawWrite, subKey); err != nil {
-		return err
+	p, err := a.authorizeRaw(c, service.CapRawWrite, c.Request.PathValue("*"), false)
+	if err != nil {
+		return a.rawAuthError(c, err)
 	}
-
+	c.Request = withPrincipal(c.Request, p)
 	return a.rawHandler.deleteFile(c)
+}
+
+// rawAuthError adds a Basic challenge to anonymous raw requests so curl
+// and download tools know to send credentials. Browsers are not prompted:
+// the challenge is only sent when the request is not from the SPA.
+func (a *api) rawAuthError(c *ada.Context, err error) error {
+	if errors.Is(err, errNoCredentials) && c.Request.Header.Get("X-Requested-With") == "" &&
+		!strings.Contains(c.Request.Header.Get("Accept"), "application/json") {
+		c.Response.Header().Set("WWW-Authenticate", `Basic realm="kutu"`)
+	}
+	return err
+}
+
+// withRawFileOp guards rename/copy/move: read on the source and write on
+// the destination (plus write on the source for moves).
+func (a *api) withRawFileOp(move bool, handler func(*ada.Context) error) func(*ada.Context) error {
+	return func(c *ada.Context) error {
+		body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<16))
+		if err != nil {
+			return errors.Join(err, service.ErrBadRequest)
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		var req fileOpRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return fmt.Errorf("invalid request: %w", service.ErrBadRequest)
+		}
+		ctx := c.Request.Context()
+		caps := service.CapabilitiesFromContext(ctx)
+		pats := service.CapabilityPatternsFromContext(ctx)
+		check := func(capKey, path string) error {
+			if !caps.Has(capKey) || !pats.Allows(capKey, path) {
+				return fmt.Errorf("path %q not permitted for %q: %w", path, capKey, service.ErrForbidden)
+			}
+			return nil
+		}
+		if err := check(service.CapRawRead, req.Src); err != nil {
+			return err
+		}
+		if move {
+			if err := check(service.CapRawWrite, req.Src); err != nil {
+				return err
+			}
+		}
+		if err := check(service.CapRawWrite, req.Dst); err != nil {
+			return err
+		}
+		return handler(c)
+	}
 }
 
 // Dispatcher returns the hook dispatcher (may be nil if no mounts are configured).
@@ -441,5 +485,3 @@ func (h *RawHandler) Dispatcher() *hook.Dispatcher {
 	}
 	return h.dispatcher
 }
-
-

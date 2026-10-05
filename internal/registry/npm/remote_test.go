@@ -31,9 +31,9 @@ func newFakeNPMUpstream() *fakeNPMUpstream {
 	return fu
 }
 
-func (fu *fakeNPMUpstream) Close()         { fu.server.Close() }
-func (fu *fakeNPMUpstream) URL() string    { return fu.server.URL }
-func (fu *fakeNPMUpstream) Hits() int32    { return fu.hits.Load() }
+func (fu *fakeNPMUpstream) Close()      { fu.server.Close() }
+func (fu *fakeNPMUpstream) URL() string { return fu.server.URL }
+func (fu *fakeNPMUpstream) Hits() int32 { return fu.hits.Load() }
 
 func (fu *fakeNPMUpstream) ServeJSON(path string, body string) {
 	fu.mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {

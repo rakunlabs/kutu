@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Lock, Loader2, Eye, EyeOff, AlertTriangle } from "lucide-svelte";
+  import { Boxes, Lock, Loader2, Eye, EyeOff, AlertTriangle } from "lucide-svelte";
   import { keymgrStore } from "@/lib/store/keymgr.svelte";
   import { appStore } from "@/lib/store/store.svelte";
   import ThemeSwitcher from "@/lib/components/ThemeSwitcher.svelte";
@@ -40,7 +40,7 @@
 
   // Surfaces the boot-time auto-unlock failure flag from /api/v1/info.
   // True only when the operator set `encryption.password` in config
-  // (or PIKA_ENCRYPTION_PASSWORD) AND that passphrase didn't decrypt
+  // (or KUTU_ENCRYPTION_PASSWORD) AND that passphrase didn't decrypt
   // the on-disk verifier. We render this above the form so it's the
   // first thing the admin sees — the manual unlock path still works
   // with the correct key, but the config file needs fixing for the
@@ -97,19 +97,20 @@
      normal app shell — the user should immediately see "this is a
      different mode, the server isn't fully running". -->
 <div
-  class="fixed inset-0 z-50 flex items-center justify-center bg-slate-100 dark:bg-warm-900 p-4 overflow-y-auto"
+  data-section="settings"
+  class="fixed inset-0 z-50 flex items-center justify-center bg-slate-100 dark:bg-warm-900 p-4 overflow-y-auto border-t-[3px] border-[var(--sec-500)]"
 >
   <div class="w-full max-w-md">
     <!-- Branding row -->
     <div
-      class="flex items-center justify-center gap-2 mb-6 text-slate-700 dark:text-slate-200"
+      class="flex items-center justify-center gap-2 mb-6 text-slate-700 dark:text-warm-200"
     >
-      <Lock size={20} />
-      <span class="text-lg font-semibold">Pika</span>
+      <Boxes size={20} color="#EF233C" />
+      <span class="text-lg font-bold" style="font-stretch: 112%">kutu</span>
     </div>
 
     <div
-      class="relative bg-white dark:bg-warm-800 border border-slate-200 dark:border-warm-700 rounded-lg p-6 shadow-sm"
+      class="relative leaf p-6"
     >
       <!-- Theme switcher pinned top-right of the card. Same component &
            placement as Login.svelte so users see a consistent toggle
@@ -119,7 +120,7 @@
       <ThemeSwitcher class="absolute top-3 right-3" />
 
       <h1
-        class="text-base font-semibold text-slate-800 dark:text-slate-100 mb-1 flex items-center gap-2"
+        class="text-base font-semibold text-slate-800 dark:text-warm-100 mb-1 flex items-center gap-2"
       >
         <Lock size={16} class="text-accent-600 dark:text-accent-400" />
         Server is locked
@@ -130,7 +131,7 @@
              within a network round-trip; rendering neither the
              form nor the "ask admin" message in that window keeps
              the screen from flashing between two states. -->
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
+        <p class="text-[13px] text-slate-500 dark:text-warm-400 mb-4">
           Checking permissions…
         </p>
         <div class="flex items-center justify-center py-4">
@@ -140,14 +141,14 @@
         {#if configInvalid}
           <!-- Boot-time auto-unlock failed: the operator set
                `encryption.password` (config file or
-               PIKA_ENCRYPTION_PASSWORD) but the value did NOT match
+               KUTU_ENCRYPTION_PASSWORD) but the value did NOT match
                the on-disk verifier. We render this BEFORE either
                the unlock form or the "ask admin" message so both
                operator personas see it; the admin can still recover
                by entering the real key below. Amber + AlertTriangle
                per DESIGN_SYSTEM §8 (warning callout). -->
           <div
-            class="mb-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded p-3 text-xs flex gap-2"
+            class="mb-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded p-3 text-[13px] flex gap-2"
             role="alert"
           >
             <AlertTriangle
@@ -164,13 +165,13 @@
               the server online, then update the config file (or
               <code
                 class="px-1 py-0.5 bg-white dark:bg-warm-900 border border-amber-200 dark:border-amber-800 rounded font-mono"
-                >PIKA_ENCRYPTION_PASSWORD</code
+                >KUTU_ENCRYPTION_PASSWORD</code
               >) so the next restart is hands-off.
             </div>
           </div>
         {/if}
         {#if canUnlock}
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
+        <p class="text-[13px] text-slate-500 dark:text-warm-400 mb-4">
           Enter the server encryption key to bring kutu online. The key is held
           in memory only — every restart will require this step.
         </p>
@@ -178,7 +179,7 @@
         <form onsubmit={onSubmit} class="space-y-3">
           <div>
             <label
-              class="block text-[10px] font-medium uppercase tracking-wider text-slate-500 mb-1"
+              class="block text-[11px] font-medium uppercase tracking-wider text-slate-500 mb-1"
               for="key-input"
             >
               Server key
@@ -193,7 +194,7 @@
                 autocomplete="current-password"
                 autofocus
                 disabled={busy}
-                class="w-full pl-3 pr-10 py-2 text-sm rounded border border-slate-300 dark:border-warm-500 bg-white dark:bg-warm-900 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-accent-500 dark:focus:border-accent-500 focus:ring-2 focus:ring-accent-500/30 disabled:opacity-50"
+                class="input font-mono !h-10 pr-10"
                 placeholder="Enter server key"
               />
               <button
@@ -210,7 +211,7 @@
 
           {#if localError || error}
             <div
-              class="p-2.5 rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300"
+              class="p-2.5 rounded border border-vermilion-300 dark:border-vermilion-700 bg-vermilion-50 dark:bg-vermilion-950/40 text-[13px] text-vermilion-700 dark:text-vermilion-300"
             >
               {localError || error}
             </div>
@@ -219,7 +220,7 @@
           <button
             type="submit"
             disabled={busy || !key}
-            class="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm rounded bg-accent-600 text-white font-medium hover:bg-accent-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            class="btn btn-primary w-full !h-10"
           >
             {#if busy}
               <Loader2 size={14} class="animate-spin" />
@@ -235,12 +236,12 @@
              and let them sign out (in case they're on the wrong
              account). No form, no input, no submit button — those
              would just produce a 403 and a confused user. -->
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
+        <p class="text-[13px] text-slate-500 dark:text-warm-400 mb-4">
           kutu is waiting for an administrator to bring it online. Most features
           will stay unavailable until then.
         </p>
         <div
-          class="p-3 rounded border border-slate-200 dark:border-warm-700 bg-slate-50 dark:bg-warm-900 text-[11px] text-slate-600 dark:text-slate-300"
+          class="p-3 rounded border border-slate-200 dark:border-warm-700 bg-slate-50 dark:bg-warm-900 text-[12px] text-slate-600 dark:text-warm-300"
         >
           Your account doesn't have permission to unlock the server. Contact
           your administrator to request <code
@@ -256,11 +257,11 @@
            sign-out is the one action everyone in this state can
            actually perform. -->
       <div
-        class="mt-4 pt-3 border-t border-slate-100 dark:border-warm-700 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400"
+        class="mt-4 pt-3 border-t border-slate-100 dark:border-warm-700 flex items-center justify-between text-[12px] text-slate-500 dark:text-warm-400"
       >
         <span class="truncate">
           Signed in as
-          <span class="font-medium text-slate-600 dark:text-slate-300"
+          <span class="font-medium text-slate-600 dark:text-warm-300"
             >{appStore.identity?.subject ?? "unknown"}</span
           >
         </span>
@@ -274,7 +275,7 @@
       </div>
     </div>
 
-    <p class="text-center text-[10px] text-slate-400 dark:text-slate-500 mt-4">
+    <p class="text-center text-[11px] text-slate-500 dark:text-warm-400 mt-4">
       The server cannot decrypt sensitive data until it's unlocked.
     </p>
   </div>

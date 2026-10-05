@@ -40,6 +40,10 @@ type Manager struct {
 type snapshot struct {
 	// regs indexes registries by their composite key "{ns}/{repo}".
 	regs map[string]Registry
+	// rows holds the settings row each registry was built from, so
+	// request-time consumers (policy gate, schedulers) can read the
+	// repo configuration without a storage round-trip.
+	rows map[string]*service.RegistryRepository
 }
 
 type factoryKey struct {
@@ -55,7 +59,7 @@ func NewManager(deps Deps) *Manager {
 	return &Manager{
 		deps:      deps,
 		factories: make(map[factoryKey]Factory),
-		current:   &snapshot{regs: map[string]Registry{}},
+		current:   &snapshot{regs: map[string]Registry{}, rows: map[string]*service.RegistryRepository{}},
 	}
 }
 
@@ -90,7 +94,7 @@ func (m *Manager) RegisterFactory(typ, kind string, f Factory) error {
 // pika (proxy reconcile, raw mount build) so one bad row never
 // disables the rest.
 func (m *Manager) Reload(ctx context.Context, rs *service.RegistrySettings) {
-	next := &snapshot{regs: map[string]Registry{}}
+	next := &snapshot{regs: map[string]Registry{}, rows: map[string]*service.RegistryRepository{}}
 
 	if rs != nil {
 		for i := range rs.Namespaces {
@@ -137,6 +141,20 @@ func (m *Manager) buildRow(ctx context.Context, ns string, r *service.RegistryRe
 		return
 	}
 	next.regs[regKey(ns, r.Name)] = reg
+	row := *r
+	next.rows[regKey(ns, r.Name)] = &row
+}
+
+// Repository returns the settings row the live registry ns/repo was
+// built from (nil when absent). Callers must treat it as read-only.
+func (m *Manager) Repository(namespace, repo string) *service.RegistryRepository {
+	m.mu.RLock()
+	snap := m.current
+	m.mu.RUnlock()
+	if snap == nil || snap.rows == nil {
+		return nil
+	}
+	return snap.rows[regKey(namespace, repo)]
 }
 
 // Lookup returns the Registry for the given (namespace, repo) pair
@@ -176,7 +194,7 @@ func (m *Manager) List() []Registry {
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	old := m.current
-	m.current = &snapshot{regs: map[string]Registry{}}
+	m.current = &snapshot{regs: map[string]Registry{}, rows: map[string]*service.RegistryRepository{}}
 	m.mu.Unlock()
 
 	if old == nil {

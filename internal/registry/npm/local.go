@@ -20,19 +20,19 @@ import (
 //
 // Lifecycle of a publish:
 //
-//   1. Client POSTs `npm publish` JSON to PUT /{pkg}.
-//   2. ParsePublish validates the envelope + decodes the tarball.
-//   3. If the version already exists, reject with 409. NPM
-//      semantics: publish without --force is not idempotent on
-//      re-push.
-//   4. Rewrite the dist.tarball URL inside the version metadata so
-//      consumers fetch from pika, not the original upstream.
-//   5. Write the tarball, the per-version meta, and the (optional)
-//      README to the store.
-//   6. Merge incoming dist-tags into the on-disk map; "latest" is
-//      auto-set when the payload omits it AND no latest exists yet.
-//   7. Cache file invalidation happens implicitly through the store
-//      (WriteVersionMeta deletes packument.json).
+//  1. Client POSTs `npm publish` JSON to PUT /{pkg}.
+//  2. ParsePublish validates the envelope + decodes the tarball.
+//  3. If the version already exists, reject with 409. NPM
+//     semantics: publish without --force is not idempotent on
+//     re-push.
+//  4. Rewrite the dist.tarball URL inside the version metadata so
+//     consumers fetch from pika, not the original upstream.
+//  5. Write the tarball, the per-version meta, and the (optional)
+//     README to the store.
+//  6. Merge incoming dist-tags into the on-disk map; "latest" is
+//     auto-set when the payload omits it AND no latest exists yet.
+//  7. Cache file invalidation happens implicitly through the store
+//     (WriteVersionMeta deletes packument.json).
 //
 // Read path (GET) is straightforward — packument is rebuilt lazily
 // from the on-disk version-meta files; tarballs stream verbatim.
@@ -105,6 +105,8 @@ func (l *Local) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		l.serveSearch(w, r)
 	case "whoami":
 		serveWhoami(w, r)
+	case "audit":
+		serveEmptyAudit(w, r)
 	case "dist-tags":
 		l.serveDistTags(w, r, req.Pkg)
 	case "dist-tag-set":

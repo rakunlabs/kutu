@@ -97,42 +97,16 @@ func TestDockerLocal_DefaultGCOptionsFromPolicy(t *testing.T) {
 	}
 }
 
-func TestDockerLocal_VersionProbeUnauthenticated(t *testing.T) {
+// Auth (challenge + /v2/token) lives in kutu's registry entry handler;
+// by the time a request reaches the Local head it is already authorized.
+func TestDockerLocal_VersionProbe(t *testing.T) {
 	l := newDockerLocal(t, true)
 	w := do(l, http.MethodGet, "/v2/", nil, nil)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
-	}
-	if w.Header().Get("WWW-Authenticate") == "" {
-		t.Fatalf("WWW-Authenticate missing")
-	}
-}
-
-func TestDockerLocal_VersionProbeAuthenticated(t *testing.T) {
-	l := newDockerLocal(t, true)
-	w := do(l, http.MethodGet, "/v2/", nil, map[string]string{
-		"Authorization": "Bearer pika_test",
-	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body %s", w.Code, w.Body.String())
 	}
 	if w.Header().Get("Docker-Distribution-API-Version") != "registry/2.0" {
 		t.Fatalf("API version header missing")
-	}
-}
-
-func TestDockerLocal_TokenIssue(t *testing.T) {
-	l := newDockerLocal(t, true)
-	w := do(l, http.MethodGet, "/v2/token?service=pika&scope=repository:lib/foo:pull", nil, map[string]string{
-		"Authorization": "Basic " + base64BasicAuth("user", "pika_test"),
-	})
-	if w.Code != http.StatusOK {
-		t.Fatalf("status %d", w.Code)
-	}
-	var resp map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	if tok, _ := resp["token"].(string); tok == "" {
-		t.Fatalf("token missing in response: %v", resp)
 	}
 }
 

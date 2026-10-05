@@ -14,8 +14,11 @@
 // until an operator unlocks (via config password auto-unlock or the UI
 // unlock screen).
 //
-// Allowlist while locked: /api/v1/info, /api/v1/key/status and
-// /api/v1/key/unlock pass through so the SPA can drive the unlock flow.
+// Allowlist while locked: /api/v1/info, /api/v1/key/status,
+// /api/v1/key/unlock and the self-service /api/v1/me/* routes pass through
+// so an administrator can sign in, drive the unlock flow and manage their
+// own second factors. Login (/login/*, /logout) is outside /api/v1/ and
+// never gated.
 // Every gated 503 carries `X-Kutu-Locked: true` so the SPA's HTTP
 // interceptor can switch to the unlock screen.
 package lockgate
@@ -48,7 +51,7 @@ func Middleware(mgr *keymgr.Manager) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if _, ok := allowExact[r.URL.Path]; ok {
+			if _, ok := allowExact[r.URL.Path]; ok || strings.HasPrefix(r.URL.Path, "/api/v1/me/") {
 				next.ServeHTTP(w, r)
 				return
 			}
